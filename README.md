@@ -80,7 +80,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/EFFECT_AND_RECOVERY.m
 
 ## Portfolio-derived design
 
-Before implementation, the full accessible `thebrazenbeard` portfolio was swept at repository level: **70 repositories** were inventoried and their current README surfaces inspected. High-value public donors were then inspected more deeply. Pro-Run is self-contained; donor repositories are architecture/provenance inputs, not runtime dependencies.
+Before implementation, the then-accessible `thebrazenbeard` portfolio was swept at repository level: **70 repositories** were inventoried and their README surfaces inspected at that historical cut. The live portfolio has since grown; the 70-repository figure is provenance for the V1 donor sweep, not a current census. High-value public donors were then inspected more deeply. Pro-Run is self-contained; donor repositories are architecture/provenance inputs, not runtime dependencies.
 
 The strongest donor mechanisms were:
 
