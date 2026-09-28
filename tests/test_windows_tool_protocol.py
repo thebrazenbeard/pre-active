@@ -66,12 +66,13 @@ def test_same_prompt_and_call_produce_same_request_id_but_new_prompt_does_not() 
     assert first["request_id"] != later["request_id"]
 
 
-def test_tool_call_rejects_suffix_or_unknown_parameter() -> None:
-    with pytest.raises(tool_protocol.ToolProtocolError, match="suffix"):
+def test_tool_call_rejects_additional_tool_markup_or_unknown_parameter() -> None:
+    with pytest.raises(tool_protocol.ToolProtocolError, match="additional tool markup"):
         tool_protocol.parse_qwen_response(
             "<tool_call><function=math.double>"
             "<parameter=value>6</parameter>"
-            "</function></tool_call> extra",
+            "</function></tool_call>"
+            "<function=math.double><parameter=value>7</parameter></function>",
             tools=TOOLS,
             messages=[],
         )
@@ -152,3 +153,23 @@ def test_text_result_renders_normal_assistant_message() -> None:
 
     assert finish_reason == "stop"
     assert message == {"role": "assistant", "content": "twelve"}
+
+
+def test_native_qwen_suffix_after_complete_tool_call_is_discarded() -> None:
+    raw = (
+        "<tool_call>\n"
+        "<function=math.double>\n"
+        "<parameter=value>\n6\n</parameter>\n"
+        "</function>\n</tool_call>\n"
+        "user\n\nuser\nassistant\n<think>\n\n</think>\n\nTOOL_LOOP_OK:12"
+    )
+
+    result = tool_protocol.parse_qwen_response(
+        raw,
+        tools=TOOLS,
+        messages=[{"role": "user", "content": "Double 6, then report the result."}],
+    )
+
+    assert result["kind"] == "tool_call"
+    assert result["name"] == "math.double"
+    assert result["arguments"] == {"value": 6}
