@@ -332,8 +332,11 @@ class Store:
     def update_run(
         self, run_id: str, *, now: float, status: str | None = None,
         final_text: str | None = None, last_error: str | None = None,
+        clear_last_error: bool = False,
         increment_step: bool = False,
     ) -> None:
+        if clear_last_error and last_error is not None:
+            raise ValueError("last_error and clear_last_error are mutually exclusive")
         sets = ["updated_at=?"]
         values: list[Any] = [now]
         if status is not None:
@@ -342,7 +345,9 @@ class Store:
         if final_text is not None:
             sets.append("final_text=?")
             values.append(final_text)
-        if last_error is not None:
+        if clear_last_error:
+            sets.append("last_error=NULL")
+        elif last_error is not None:
             sets.append("last_error=?")
             values.append(last_error)
         if increment_step:
@@ -364,7 +369,7 @@ class Store:
             cursor = self.connection.execute(
                 """
                 UPDATE runs
-                SET step_count=step_count+1, updated_at=?
+                SET step_count=step_count+1, last_error=NULL, updated_at=?
                 WHERE id=? AND status='RUNNING' AND step_count=?
                 """,
                 (now, run_id, int(expected_step)),
