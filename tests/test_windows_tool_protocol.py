@@ -46,7 +46,7 @@ def test_native_qwen_tool_call_becomes_structured_openai_call() -> None:
     assert result["request_id"].startswith("call_")
 
 
-def test_same_prompt_and_call_produce_same_request_id_but_new_prompt_does_not() -> None:
+def test_independent_identical_tool_calls_get_distinct_request_ids() -> None:
     raw = (
         "<tool_call><function=math.double>"
         "<parameter=value>6</parameter>"
@@ -55,15 +55,13 @@ def test_same_prompt_and_call_produce_same_request_id_but_new_prompt_does_not() 
     first = tool_protocol.parse_qwen_response(
         raw, tools=TOOLS, messages=[{"role": "user", "content": "Double 6."}]
     )
-    replay = tool_protocol.parse_qwen_response(
+    second = tool_protocol.parse_qwen_response(
         raw, tools=TOOLS, messages=[{"role": "user", "content": "Double 6."}]
     )
-    later = tool_protocol.parse_qwen_response(
-        raw, tools=TOOLS, messages=[{"role": "user", "content": "Double 6 again."}]
-    )
 
-    assert first["request_id"] == replay["request_id"]
-    assert first["request_id"] != later["request_id"]
+    assert first["request_id"].startswith("call_")
+    assert second["request_id"].startswith("call_")
+    assert first["request_id"] != second["request_id"]
 
 
 def test_tool_call_rejects_additional_tool_markup_or_unknown_parameter() -> None:
