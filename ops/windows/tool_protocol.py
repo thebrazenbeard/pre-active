@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
+import uuid
 from typing import Any
 
 
@@ -176,14 +176,7 @@ def parse_qwen_response(
             "required parameter(s) missing: " + ", ".join(sorted(missing))
         )
 
-    identity = {
-        "messages": messages,
-        "tool": name,
-        "arguments": arguments,
-    }
-    request_id = "call_" + hashlib.sha256(
-        _canonical_json(identity).encode("utf-8")
-    ).hexdigest()[:24]
+    request_id = "call_" + uuid.uuid4().hex
 
     return {
         "kind": "tool_call",
