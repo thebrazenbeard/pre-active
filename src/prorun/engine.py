@@ -285,6 +285,7 @@ class Engine:
                     now=now,
                     status="COMPLETED",
                     final_text=response.final_text,
+                    clear_last_error=True,
                     increment_step=True,
                 )
             self.store.ack_event(event.id, worker_id=self.worker_id, now=now)

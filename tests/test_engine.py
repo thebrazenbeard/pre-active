@@ -574,3 +574,98 @@ def test_malformed_task_request_is_rejected_without_retry_loop(tmp_path: Path) -
     assert store.pending_event_count() == 0
     journal = store.list_journal(subject_id=event_id)
     assert any(entry["event_type"] == "EVENT_REJECTED" for entry in journal)
+
+
+
+def test_successful_retry_clears_previous_provider_error(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class FlakyThenFinalModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def respond(self, *, messages, tools):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("temporary provider outage")
+            return ModelResponse(final_text="recovered")
+
+    engine = Engine(
+        store=store,
+        model=FlakyThenFinalModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+    )
+    run_id = engine.submit_task("recover after provider outage", set(), now=1.0)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="temporary provider outage"):
+        engine.run_once(now=2.0)
+
+    failed = store.get_run(run_id)
+    assert failed["status"] == "RUNNING"
+    assert "temporary provider outage" in failed["last_error"]
+
+    assert engine.run_once(now=10.0) == run_id
+    recovered = store.get_run(run_id)
+    assert recovered["status"] == "COMPLETED"
+    assert recovered["final_text"] == "recovered"
+    assert recovered["last_error"] is None
+
+
+def test_successful_tool_step_clears_previous_provider_error(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+    tools.register(
+        ToolSpec(
+            name="read.value",
+            description="read one value",
+            input_schema={"type": "object"},
+            capability="read.value",
+            mutation=False,
+        ),
+        lambda args: {"value": 7},
+    )
+
+    class FlakyThenToolModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def respond(self, *, messages, tools):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("temporary provider outage")
+            return ModelResponse(
+                tool_call=ToolCall(
+                    request_id="read-after-recovery",
+                    name="read.value",
+                    arguments={},
+                )
+            )
+
+    engine = Engine(
+        store=store,
+        model=FlakyThenToolModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+    )
+    run_id = engine.submit_task("recover then read", {"read.value"}, now=1.0)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="temporary provider outage"):
+        engine.run_once(now=2.0)
+
+    assert "temporary provider outage" in store.get_run(run_id)["last_error"]
+
+    assert engine.run_once(now=10.0) == run_id
+    recovered = store.get_run(run_id)
+    assert recovered["status"] == "RUNNING"
+    assert recovered["step_count"] == 1
+    assert recovered["last_error"] is None
