@@ -122,8 +122,9 @@ def parse_qwen_response(
         raise ToolProtocolError("exactly one tool call is permitted")
 
     match = matches[0]
-    if text[match.end() :].strip():
-        raise ToolProtocolError("tool call contains a forbidden suffix")
+    suffix = text[match.end() :].strip()
+    if suffix and any(marker in suffix for marker in _TOOL_MARKERS):
+        raise ToolProtocolError("tool call suffix contains additional tool markup")
 
     name = match.group(1).strip()
     specs = _function_specs(tools)
