@@ -35,7 +35,8 @@ def test_event_lifecycle_is_append_only_journaled(tmp_path: Path) -> None:
     )
     event = store.claim_event(worker_id="w1", now=2.0, lease_seconds=10.0)
     assert event is not None
-    store.ack_event(event.id, worker_id="w1", now=3.0)
+    assert event.lease_token
+    store.ack_event(event.id, worker_id="w1", lease_token=event.lease_token, now=3.0)
 
     entries = store.list_journal(subject_id=event_id)
     assert [entry["event_type"] for entry in entries] == [
