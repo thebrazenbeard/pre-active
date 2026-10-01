@@ -603,8 +603,9 @@ class Store:
             UPDATE events
             SET status='DONE', lease_owner=NULL, lease_until=NULL, lease_token=NULL, updated_at=?
             WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+              AND lease_until IS NOT NULL AND lease_until > ?
             """,
-            (now, event_id, worker_id, lease_token),
+            (now, event_id, worker_id, lease_token, now),
         )
         if cursor.rowcount != 1:
             raise RuntimeError("event acknowledgement lost lease ownership")
@@ -625,6 +626,7 @@ class Store:
         retry_at: float | None = None,
         max_attempts: int | None = None,
         error: str | None = None,
+        failed_run_id: str | None = None,
     ) -> bool:
         if max_attempts is not None and max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
@@ -634,8 +636,9 @@ class Store:
                 """
                 SELECT attempts FROM events
                 WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+                  AND lease_until IS NOT NULL AND lease_until > ?
                 """,
-                (event_id, worker_id, lease_token),
+                (event_id, worker_id, lease_token, now),
             ).fetchone()
             if row is None:
                 raise RuntimeError("event failure update lost lease ownership")
@@ -665,6 +668,19 @@ class Store:
                     },
                     now=now,
                 )
+                if failed_run_id is not None:
+                    run_cursor = self.connection.execute(
+                        """
+                        UPDATE runs
+                        SET status='FAILED', last_error=?, updated_at=?
+                        WHERE id=? AND status='RUNNING'
+                        """,
+                        (error, now, failed_run_id),
+                    )
+                    if run_cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "dead-letter run transition requires one RUNNING run"
+                        )
             else:
                 effective_retry_at = now if retry_at is None else retry_at
                 cursor = self.connection.execute(
