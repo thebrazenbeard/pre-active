@@ -79,6 +79,7 @@ class Engine:
         lease_seconds: float = 30.0,
         lease_heartbeat_seconds: float | None = None,
         max_lease_extension_seconds: float = 900.0,
+        max_event_attempts: int = 16,
         max_steps: int = 24,
     ) -> None:
         self.store = store
@@ -89,7 +90,10 @@ class Engine:
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
         self.lease_heartbeat_seconds = lease_heartbeat_seconds
+        if max_event_attempts < 1:
+            raise ValueError("max_event_attempts must be >= 1")
         self.max_lease_extension_seconds = max_lease_extension_seconds
+        self.max_event_attempts = int(max_event_attempts)
         self.max_steps = max_steps
 
     def submit_task(
@@ -322,12 +326,22 @@ class Engine:
             self.store.update_run(run_id, now=now, last_error=f"{type(exc).__name__}: {exc}")
             raise
         except BaseException as exc:
-            self.store.update_run(run_id, now=now, last_error=f"{type(exc).__name__}: {exc}")
-            self.store.fail_event(
+            error = f"{type(exc).__name__}: {exc}"
+            self.store.update_run(run_id, now=now, last_error=error)
+            dead_lettered = self.store.fail_event(
                 event.id,
                 worker_id=self.worker_id,
                 lease_token=event.lease_token,
                 now=now,
                 retry_at=now + min(60.0, 2.0 ** min(event.attempts, 6)),
+                max_attempts=self.max_event_attempts,
+                error=error,
             )
+            if dead_lettered:
+                self.store.update_run(
+                    run_id,
+                    now=now,
+                    status="FAILED",
+                    last_error=error,
+                )
             raise
