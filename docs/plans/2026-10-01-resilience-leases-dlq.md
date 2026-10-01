@@ -77,17 +77,37 @@
 - [ ] Wire engine and CLI.
 - [ ] Run focused and full tests.
 
-### Task 4: Documentation and regression verification
+### Task 4: Dead-letter inspection and exact redrive
+
+**Files:**
+- Modify: `src/pre_active/store.py`
+- Modify: `src/pre_active/cli.py`
+- Modify: `tests/test_event_queue.py`
+- Modify: `tests/test_cli.py`
+
+**Interfaces:**
+- Produces: `Store.list_dead_events(limit=100) -> list[dict]`.
+- Produces: `Store.redrive_event(event_id, *, now) -> None`.
+- Produces CLI commands: `pre-active dead` and `pre-active redrive <event-id>`.
+
+- [ ] Add red tests proving dead events require an explicit redrive API and operator commands.
+- [ ] Preserve event identity/dedup binding while resetting attempts and retry evidence.
+- [ ] Record the exact dead-letter event ID on a failed run and require that binding before run resurrection.
+- [ ] Add end-to-end CLI round-trip coverage.
+- [ ] Run focused and full tests.
+
+### Task 5: Documentation and regression verification
 
 **Files:**
 - Modify: `README.md`
 - Modify: `docs/ARCHITECTURE.md`
 - Modify: `docs/EFFECT_AND_RECOVERY.md`
+- Modify: `docs/specs/2026-10-01-resilience-hardening-design.md`
 
 **Interfaces:**
-- Documents exact lease/dead-letter semantics and non-promotions.
+- Documents exact lease, fenced-commit, dead-letter, and redrive semantics and non-promotions.
 
-- [ ] Document fenced claims, bounded renewal, attempt ceiling, and `DEAD` state.
+- [ ] Document fenced claims, bounded renewal, attempt ceiling, `DEAD` state, exact run failure binding, and explicit redrive.
 - [ ] Run `python -m compileall -q src`.
 - [ ] Run `pytest` on Python 3.11/3.12/3.13 through repository CI.
 - [ ] Verify exact branch head and changed-file set before Draft PR readiness classification.
