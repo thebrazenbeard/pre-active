@@ -24,6 +24,14 @@ Queue work is claimed under `BEGIN IMMEDIATE`. Every successful claim receives a
 
 `pre_active.lease.LeaseHeartbeat` renews the exact active claim on a dedicated SQLite connection while model/tool work can block longer than the original lease. Renewal is bounded by `max_lease_extension_seconds`; reaching the ceiling or losing the exact claim makes the heartbeat fail closed. Lease ownership is queue coordination only and does not confer capability or effect authority.
 
+### Operational snapshot
+
+`Store.operational_snapshot(now=...)` provides a low-cardinality, JSON-safe view of one SQLite state snapshot for operators and future telemetry exporters. It includes durable event counts by status, ready/delayed/retry backlog, active and expired claim counts, oldest ready/dead/expired-lease ages, run counts by status, and enabled/due schedules.
+
+The snapshot deliberately does not emit event IDs, run IDs, arbitrary error strings, or a universal `healthy` boolean. Queue age and backlog measurements are evidence; alert thresholds depend on workload expectations. Database activity also does not prove that a daemon process is currently alive.
+
+The CLI `pre-active status` projects this snapshot directly while retaining its prior top-level compatibility fields.
+
 ### Scheduler
 
 `pre_active.scheduler.Scheduler` emits due schedule occurrences into the same durable queue used by external events. Each occurrence has a stable deduplication key derived from schedule ID and due timestamp, so rerunning a scheduler tick does not create duplicate occurrences.
