@@ -1,11 +1,11 @@
 from pathlib import Path
 
-from prorun.context import ContextAssembler
-from prorun.daemon import Daemon
-from prorun.engine import Engine, ModelResponse
-from prorun.scheduler import Scheduler
-from prorun.store import Store
-from prorun.tools import ToolRegistry
+from pre_active.context import ContextAssembler
+from pre_active.daemon import Daemon
+from pre_active.engine import Engine, ModelResponse
+from pre_active.scheduler import Scheduler
+from pre_active.store import Store
+from pre_active.tools import ToolRegistry
 
 
 class FinalModel:
@@ -57,7 +57,7 @@ def test_run_forever_survives_retryable_cycle_exception(monkeypatch) -> None:
         raise KeyboardInterrupt
 
     monkeypatch.setattr(daemon, "cycle", flaky_cycle)
-    monkeypatch.setattr("prorun.daemon.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("pre_active.daemon.time.sleep", lambda _seconds: None)
 
     import pytest
 

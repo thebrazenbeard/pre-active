@@ -1,18 +1,18 @@
-# Pro-Run V1 Architecture
+# Pre-Active V1 Architecture
 
 Status: executable V1 candidate.
 
 ## Purpose
 
-Pro-Run is a host-side continuity and execution kernel for stateless language-model inference. It owns durable orchestration state; a model remains a replaceable reasoning component. A host may run Pro-Run continuously, wake it from schedules or external events, and bind tool adapters to real systems without treating model output as effect authority.
+Pre-Active is a host-side continuity and execution kernel for stateless language-model inference. It owns durable orchestration state; a model remains a replaceable reasoning component. A host may run Pre-Active continuously, wake it from schedules or external events, and bind tool adapters to real systems without treating model output as effect authority.
 
-The architecture is intentionally self-contained. Portfolio repositories influenced its invariants, but Pro-Run has no sibling-repository runtime dependency.
+The architecture is intentionally self-contained. Portfolio repositories influenced its invariants, but Pre-Active has no sibling-repository runtime dependency.
 
 ## Components
 
 ### Durable store
 
-`prorun.store.Store` uses SQLite in WAL mode. It persists:
+`pre_active.store.Store` uses SQLite in WAL mode. It persists:
 
 - event queue entries and worker leases;
 - task runs, source-event bindings, idempotently keyed durable transcripts, and per-step model decisions;
@@ -24,11 +24,11 @@ Queue work is claimed under `BEGIN IMMEDIATE`. An expired lease can be reclaimed
 
 ### Scheduler
 
-`prorun.scheduler.Scheduler` emits due schedule occurrences into the same durable queue used by external events. Each occurrence has a stable deduplication key derived from schedule ID and due timestamp, so rerunning a scheduler tick does not create duplicate occurrences.
+`pre_active.scheduler.Scheduler` emits due schedule occurrences into the same durable queue used by external events. Each occurrence has a stable deduplication key derived from schedule ID and due timestamp, so rerunning a scheduler tick does not create duplicate occurrences.
 
 ### Engine
 
-`prorun.engine.Engine` implements the persistent ReAct-style loop:
+`pre_active.engine.Engine` implements the persistent ReAct-style loop:
 
 1. claim one durable event;
 2. atomically create an idempotently source-bound durable run plus its initial `run.step`, or load an existing `run.step`;
@@ -52,13 +52,13 @@ RUNNING -> COMPLETED
 
 ### Context assembler
 
-`prorun.context.ContextAssembler` applies a strict character budget. It preserves the system instruction and current task before optional durable memory. Memory is selected by simple lexical relevance plus stored salience. V1 deliberately keeps this selection deterministic and inspectable rather than hiding retrieval behind an opaque agent framework.
+`pre_active.context.ContextAssembler` applies a strict character budget. It preserves the system instruction and current task before optional durable memory. Memory is selected by simple lexical relevance plus stored salience. V1 deliberately keeps this selection deterministic and inspectable rather than hiding retrieval behind an opaque agent framework.
 
 ### Model boundary
 
 The core depends only on the `ModelAdapter` protocol. `OpenAICompatibleAdapter` is a minimal implementation for chat-completions-compatible endpoints.
 
-Pro-Run constrains provider output to one tool call per turn. This is not a claim that parallel work is always wrong; it is a deliberate effect-ordering boundary. A higher layer can decompose independent work into multiple durable events/runs instead of issuing concurrent unjournaled mutations from one inference response.
+Pre-Active constrains provider output to one tool call per turn. This is not a claim that parallel work is always wrong; it is a deliberate effect-ordering boundary. A higher layer can decompose independent work into multiple durable events/runs instead of issuing concurrent unjournaled mutations from one inference response.
 
 ### Tool registry and effect ledger
 
@@ -96,7 +96,7 @@ A committed request with the same request ID and digest returns the stored resul
 
 ### Effect recovery barrier
 
-If a mutation handler fails after durable admission, Pro-Run cannot infer whether the outside world changed. The engine therefore moves the run to `BLOCKED_EFFECT`, acknowledges the queue event, and stops automatic progress for that run.
+If a mutation handler fails after durable admission, Pre-Active cannot infer whether the outside world changed. The engine therefore moves the run to `BLOCKED_EFFECT`, acknowledges the queue event, and stops automatic progress for that run.
 
 Recovery requires external evidence passed to `ToolRegistry.reconcile`. If no effect occurred, `Engine.resume_blocked_effect` retries the exact persisted request. If the effect did occur, the reconciled committed result is replayed. In either case the model is not invited to invent a substitute mutation before the ambiguity is resolved.
 
@@ -116,7 +116,7 @@ Claim priority is deterministic: higher `priority`, then older creation time.
 
 ## Crash model
 
-Pro-Run is designed around process death at arbitrary points:
+Pre-Active is designed around process death at arbitrary points:
 
 - death before queue claim: event remains pending;
 - death after claim but before completion: lease expires and event becomes reclaimable;
@@ -146,7 +146,7 @@ model request
     != independently verified effect
 ```
 
-Tool adapters are responsible for target-specific authorization, sandboxing, authentication, and readback beyond the generic Pro-Run ledger.
+Tool adapters are responsible for target-specific authorization, sandboxing, authentication, and readback beyond the generic Pre-Active ledger.
 
 ## Determinism and canonical identity
 
@@ -156,7 +156,7 @@ V1 does not claim canonical JSON interoperability with every language/runtime. C
 
 ## Failure classes
 
-Pro-Run distinguishes:
+Pre-Active distinguishes:
 
 - provider/model failure: retryable through the queue with bounded exponential delay;
 - daemon cycle exception: reported to stderr and polling continues after the engine has durably classified/requeued the work; `KeyboardInterrupt`/`SystemExit` still terminate normally;
@@ -168,7 +168,7 @@ Pro-Run distinguishes:
 
 ## Extension seams
 
-Hosts can extend Pro-Run through:
+Hosts can extend Pre-Active through:
 
 - custom `ModelAdapter` implementations;
 - custom `ToolRegistry` registrations;

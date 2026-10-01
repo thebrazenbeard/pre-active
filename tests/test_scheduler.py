@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from prorun.scheduler import Scheduler
-from prorun.store import Store
+from pre_active.scheduler import Scheduler
+from pre_active.store import Store
 
 
 def test_interval_schedule_emits_each_occurrence_once(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-"""Pro-Run durable execution kernel."""
+"""Pre-Active durable execution kernel."""
 
 from .store import Event, Store
 

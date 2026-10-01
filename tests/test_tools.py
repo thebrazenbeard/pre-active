@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from prorun.store import Store
-from prorun.tools import ToolRegistry, ToolSpec
+from pre_active.store import Store
+from pre_active.tools import ToolRegistry, ToolSpec
 
 
 def test_mutation_tool_is_idempotent_across_retry(tmp_path: Path) -> None:
@@ -69,7 +69,7 @@ def test_ambiguous_mutation_must_be_reconciled_before_retry(tmp_path: Path) -> N
     )
 
     import pytest
-    from prorun.tools import AmbiguousEffect
+    from pre_active.tools import AmbiguousEffect
 
     with pytest.raises(RuntimeError):
         registry.execute(
@@ -128,7 +128,7 @@ def test_tool_arguments_are_validated_against_json_schema_before_handler(tmp_pat
     )
 
     import pytest
-    from prorun.tools import ToolError
+    from pre_active.tools import ToolError
 
     with pytest.raises(ToolError, match="arguments do not match input_schema"):
         registry.execute(
