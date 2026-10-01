@@ -52,21 +52,24 @@
 - [x] Ensure paused pre-dispatch events resume with the same event identity/generation.
 - [x] Ensure post-tool pause advances generation once and resumes at the successor generation.
 
-### Task 3: Ambiguous-effect precedence
+### Task 3: Ambiguous-effect precedence and exact dispatch gate
 
 **Files:**
+- Modify: `src/pre_active/tools.py`
 - Modify: `src/pre_active/engine.py`
 - Modify: `src/pre_active/store.py`
 - Test: `tests/test_run_control.py`
 
 **Interfaces:**
-- Reuse the existing `ToolRegistry.effect_state()` seam rather than adding a duplicate effect API.
+- Reuse the existing `ToolRegistry.effect_state()` seam rather than adding a duplicate effect-state API.
+- Add optional provider-neutral `ToolRegistry.execute(..., before_dispatch=...)` so the engine can perform the final durable-control check at the exact dispatch boundary.
 - `Engine.resume_blocked_effect` applies pending control after reconciliation without retrying `RECONCILED_NO_EFFECT` solely for recovery.
 
 - [x] Test CANCEL during `BLOCKED_EFFECT` remains blocked before reconciliation.
 - [x] Test confirmed effect records result then cancels.
 - [x] Test confirmed no-effect + CANCEL does not invoke the mutation handler.
 - [x] Test confirmed no-effect + PAUSE pauses before retry; resume preserves exact stored request identity.
+- [x] Test cancellation after tool-decision persistence still prevents handler dispatch.
 
 ### Task 4: Operator CLI and documentation
 
