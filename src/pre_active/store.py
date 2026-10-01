@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS events (
     lease_until REAL,
     lease_token TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    dead_lettered_at REAL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -109,6 +111,10 @@ class Store:
         event_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(events)")}
         if "lease_token" not in event_columns:
             self.connection.execute("ALTER TABLE events ADD COLUMN lease_token TEXT")
+        if "last_error" not in event_columns:
+            self.connection.execute("ALTER TABLE events ADD COLUMN last_error TEXT")
+        if "dead_lettered_at" not in event_columns:
+            self.connection.execute("ALTER TABLE events ADD COLUMN dead_lettered_at REAL")
         run_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(runs)")}
         if "blocked_request_id" not in run_columns:
             self.connection.execute("ALTER TABLE runs ADD COLUMN blocked_request_id TEXT")
@@ -617,24 +623,83 @@ class Store:
         lease_token: str,
         now: float,
         retry_at: float | None = None,
-    ) -> None:
-        cursor = self.connection.execute(
-            """
-            UPDATE events
-            SET status='PENDING', lease_owner=NULL, lease_until=NULL, lease_token=NULL,
-                available_at=?, updated_at=?
-            WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
-            """,
-            (now if retry_at is None else retry_at, now, event_id, worker_id, lease_token),
-        )
-        if cursor.rowcount != 1:
-            raise RuntimeError("event failure update lost lease ownership")
-        self.append_journal(
-            event_type="EVENT_RETRY_SCHEDULED",
-            subject_id=event_id,
-            payload={"worker_id": worker_id, "retry_at": now if retry_at is None else retry_at},
-            now=now,
-        )
+        max_attempts: int | None = None,
+        error: str | None = None,
+    ) -> bool:
+        if max_attempts is not None and max_attempts < 1:
+            raise ValueError("max_attempts must be >= 1")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT attempts FROM events
+                WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+                """,
+                (event_id, worker_id, lease_token),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("event failure update lost lease ownership")
+            dead_lettered = (
+                max_attempts is not None and int(row["attempts"]) >= max_attempts
+            )
+            if dead_lettered:
+                cursor = self.connection.execute(
+                    """
+                    UPDATE events
+                    SET status='DEAD', lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                        last_error=?, dead_lettered_at=?, updated_at=?
+                    WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+                    """,
+                    (error, now, now, event_id, worker_id, lease_token),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("event dead-letter update lost lease ownership")
+                self.append_journal(
+                    event_type="EVENT_DEAD_LETTERED",
+                    subject_id=event_id,
+                    payload={
+                        "worker_id": worker_id,
+                        "attempts": int(row["attempts"]),
+                        "max_attempts": max_attempts,
+                        "error": error,
+                    },
+                    now=now,
+                )
+            else:
+                effective_retry_at = now if retry_at is None else retry_at
+                cursor = self.connection.execute(
+                    """
+                    UPDATE events
+                    SET status='PENDING', lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                        available_at=?, last_error=?, dead_lettered_at=NULL, updated_at=?
+                    WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+                    """,
+                    (
+                        effective_retry_at,
+                        error,
+                        now,
+                        event_id,
+                        worker_id,
+                        lease_token,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("event failure update lost lease ownership")
+                self.append_journal(
+                    event_type="EVENT_RETRY_SCHEDULED",
+                    subject_id=event_id,
+                    payload={
+                        "worker_id": worker_id,
+                        "retry_at": effective_retry_at,
+                        "error": error,
+                    },
+                    now=now,
+                )
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+        return dead_lettered
 
     def list_events(self, *, kind: str | None = None) -> list[dict[str, Any]]:
         if kind is None:
@@ -653,6 +718,8 @@ class Store:
                 "dedup_key": row["dedup_key"],
                 "status": str(row["status"]),
                 "attempts": int(row["attempts"]),
+                "last_error": row["last_error"],
+                "dead_lettered_at": row["dead_lettered_at"],
             }
             for row in rows
         ]
