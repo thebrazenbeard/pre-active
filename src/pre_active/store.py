@@ -646,14 +646,45 @@ class Store:
         try:
             row = self.connection.execute(
                 """
-                SELECT status, step_count, paused_event_id
+                SELECT status, step_count, paused_event_id, control_action
                 FROM runs WHERE id=?
                 """,
                 (run_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(run_id)
-            if str(row["status"]) != "PAUSED":
+
+            status = str(row["status"])
+            control_action = row["control_action"]
+            if status == "RUNNING":
+                if control_action == "CANCEL":
+                    raise RuntimeError("cannot resume while CANCEL is pending")
+                if control_action != "PAUSE":
+                    raise RuntimeError("run is not PAUSED and has no pending PAUSE")
+                cursor = self.connection.execute(
+                    """
+                    UPDATE runs
+                    SET control_action=NULL, control_reason=NULL,
+                        control_requested_at=NULL, updated_at=?
+                    WHERE id=? AND status='RUNNING' AND control_action='PAUSE'
+                    """,
+                    (now, run_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("pending PAUSE withdrawal lost run control state")
+                self.append_journal(
+                    event_type="RUN_RESUMED",
+                    subject_id=run_id,
+                    payload={
+                        "reason": reason,
+                        "pending_pause_withdrawn": True,
+                        "step": int(row["step_count"]),
+                    },
+                    now=now,
+                )
+                self.connection.execute("COMMIT")
+                return
+            if status != "PAUSED":
                 raise RuntimeError("run is not PAUSED")
 
             paused_event_id = row["paused_event_id"]
