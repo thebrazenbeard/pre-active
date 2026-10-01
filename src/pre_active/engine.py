@@ -158,6 +158,7 @@ class Engine:
             event_id=event.id,
             worker_id=self.worker_id,
             lease_token=event.lease_token,
+            claimed_at=now,
             lease_seconds=self.lease_seconds,
             heartbeat_seconds=self.lease_heartbeat_seconds,
             max_extension_seconds=self.max_lease_extension_seconds,
