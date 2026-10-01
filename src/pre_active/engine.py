@@ -553,6 +553,37 @@ class Engine:
                             now=transition_now,
                         )
                 return run_id
+        except NonRetryableModelError as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            with self.store.active_claim_transaction(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time,
+                validate=heartbeat.assert_owned,
+            ) as transition_now:
+                self.store.update_run(
+                    run_id,
+                    now=transition_now,
+                    status="FAILED",
+                    last_error=error,
+                )
+                self.store.append_journal(
+                    event_type="MODEL_FAILURE_TERMINAL",
+                    subject_id=run_id,
+                    payload={
+                        "event_id": event.id,
+                        "error": error,
+                    },
+                    now=transition_now,
+                )
+                self.store.ack_event(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=transition_now,
+                )
+            return run_id
         except EventLeaseLost as exc:
             raise LeaseLost(str(exc)) from exc
         except LeaseLost as exc:
