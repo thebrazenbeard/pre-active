@@ -50,6 +50,8 @@ def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
         system_prompt=args.system_prompt,
         worker_id=args.worker_id,
         lease_seconds=args.lease_seconds,
+        lease_heartbeat_seconds=args.lease_heartbeat_seconds,
+        max_lease_extension_seconds=args.max_lease_extension_seconds,
         max_steps=args.max_steps,
     )
     return Daemon(scheduler=Scheduler(store), engine=engine)
@@ -87,6 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
         run.add_argument("--system-prompt", default="Execute the task using only admitted tools and capabilities.")
         run.add_argument("--worker-id", default=f"pre-active-{os.getpid()}")
         run.add_argument("--lease-seconds", type=float, default=30.0)
+        run.add_argument("--lease-heartbeat-seconds", type=float)
+        run.add_argument("--max-lease-extension-seconds", type=float, default=900.0)
         run.add_argument("--max-steps", type=int, default=24)
         if name == "daemon":
             run.add_argument("--poll-seconds", type=float, default=1.0)
