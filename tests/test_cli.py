@@ -45,3 +45,30 @@ def test_runtime_cli_exposes_event_attempt_ceiling() -> None:
     ])
 
     assert args.max_event_attempts == 20
+
+
+def test_status_reports_dead_lettered_event_count(tmp_path: Path, capsys) -> None:
+    state = tmp_path / "state.db"
+    store = Store(state)
+    event_id = store.enqueue_event(
+        kind="probe",
+        payload={"value": 1},
+        dedup_key="status-dead-probe",
+        now=1.0,
+    )
+    event = store.claim_event(worker_id="w1", now=2.0, lease_seconds=10.0)
+    assert event is not None and event.lease_token
+    assert store.fail_event(
+        event_id,
+        worker_id="w1",
+        lease_token=event.lease_token,
+        now=3.0,
+        max_attempts=1,
+        error="permanent failure",
+    ) is True
+    store.close()
+
+    assert main(["--state", str(state), "status"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pending_events"] == 0
+    assert payload["dead_events"] == 1
