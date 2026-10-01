@@ -73,6 +73,10 @@ If a PAUSE request is still pending on a `RUNNING` run and has not reached a saf
 
 The core depends only on the `ModelAdapter` protocol. `OpenAICompatibleAdapter` is a minimal implementation for chat-completions-compatible endpoints.
 
+The model boundary exposes explicit orchestration failure classes. `RetryableModelError` carries a descriptive category plus an optional provider-directed minimum retry delay. `NonRetryableModelError` identifies failures that should terminate the run rather than consume infrastructure retries. The bundled adapter classifies network/timeouts and HTTP `408/429/500/502/503/504` as retryable, while other HTTP client errors and malformed provider protocol/JSON fail closed as non-retryable.
+
+Retryable model failures use the existing durable queue rather than sleeping inside the worker: the retry event receives capped exponential delay plus deterministic sub-second jitter derived from exact event ID + attempt. A valid HTTP `Retry-After` delay-seconds or HTTP-date becomes a lower bound on that delay. Attempt ceilings and dead-letter/redrive remain unchanged.
+
 Pre-Active constrains provider output to one tool call per turn. This is not a claim that parallel work is always wrong; it is a deliberate effect-ordering boundary. A higher layer can decompose independent work into multiple durable events/runs instead of issuing concurrent unjournaled mutations from one inference response.
 
 ### Tool registry and effect ledger
@@ -177,7 +181,9 @@ V1 does not claim canonical JSON interoperability with every language/runtime. C
 
 Pre-Active distinguishes:
 
-- provider/model failure: retryable through the queue with bounded exponential delay and a configurable attempt ceiling; exhaustion dead-letters the event and fails an associated running run;
+- known transient provider/model failure: retryable through the queue with bounded exponential delay, deterministic jitter, optional provider-directed `Retry-After` floor, and the existing configurable attempt ceiling; exhaustion dead-letters the event and fails an associated running run;
+- known permanent provider/model failure: terminal run failure with `MODEL_FAILURE_TERMINAL` evidence and current-event acknowledgement; it does not consume further queue retries;
+- unknown model/runtime exception: preserves the existing bounded generic retry path rather than being silently promoted to permanent failure;
 - daemon cycle exception: reported to stderr and polling continues after the engine has durably classified/requeued the work; `KeyboardInterrupt`/`SystemExit` still terminate normally;
 - malformed `task.requested` envelope: terminally journaled as `EVENT_REJECTED` and acknowledged rather than retried forever;
 - deterministic tool admission failure: reported to the run; host should repair configuration/input rather than blindly expand authority;
