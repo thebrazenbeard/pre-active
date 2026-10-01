@@ -122,3 +122,96 @@ def test_dead_and_redrive_cli_round_trip(tmp_path: Path, capsys) -> None:
     assert row["status"] == "PENDING"
     assert row["attempts"] == 0
     reopened.close()
+
+
+def test_cli_exposes_run_control_commands() -> None:
+    import argparse
+
+    parser = build_parser()
+    subparsers = next(
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    assert {"pause", "resume", "cancel"} <= set(subparsers.choices)
+
+
+def test_pause_and_cancel_cli_persist_operator_control(tmp_path: Path, capsys) -> None:
+    state = tmp_path / "state.db"
+    store = Store(state)
+    run_id = store.create_run_with_initial_step(
+        task="operator controlled",
+        capabilities=set(),
+        now=1.0,
+    )
+    store.close()
+
+    assert main([
+        "--state", str(state),
+        "pause", run_id,
+        "--reason", "inspect state",
+    ]) == 0
+    pause_payload = json.loads(capsys.readouterr().out)
+    assert pause_payload["run_id"] == run_id
+    assert pause_payload["control_action"] == "PAUSE"
+
+    check = Store(state)
+    assert check.get_run(run_id)["control_action"] == "PAUSE"
+    check.close()
+
+    assert main([
+        "--state", str(state),
+        "cancel", run_id,
+        "--reason", "stop work",
+    ]) == 0
+    cancel_payload = json.loads(capsys.readouterr().out)
+    assert cancel_payload["run_id"] == run_id
+    assert cancel_payload["control_action"] == "CANCEL"
+
+    check = Store(state)
+    assert check.get_run(run_id)["control_action"] == "CANCEL"
+    check.close()
+
+
+def test_resume_cli_requeues_paused_run(tmp_path: Path, capsys) -> None:
+    state = tmp_path / "state.db"
+    store = Store(state)
+    run_id = store.create_run_with_initial_step(
+        task="resume me",
+        capabilities=set(),
+        now=1.0,
+    )
+    [event] = store.list_events(kind="run.step")
+    claim = store.claim_event(worker_id="w1", now=2.0, lease_seconds=10.0)
+    assert claim is not None and claim.id == event["id"] and claim.lease_token
+    store.request_run_control(run_id, action="PAUSE", reason="hold", now=2.5)
+    with store.active_claim_transaction(
+        claim.id,
+        worker_id="w1",
+        lease_token=claim.lease_token,
+        now=3.0,
+    ):
+        store.apply_claimed_run_control(
+            run_id=run_id,
+            event_id=claim.id,
+            worker_id="w1",
+            lease_token=claim.lease_token,
+            now=3.0,
+        )
+    assert store.get_run(run_id)["status"] == "PAUSED"
+    store.close()
+
+    assert main([
+        "--state", str(state),
+        "resume", run_id,
+        "--reason", "continue",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"run_id": run_id, "status": "RUNNING"}
+
+    reopened = Store(state)
+    assert reopened.get_run(run_id)["status"] == "RUNNING"
+    [resumed] = reopened.list_events(kind="run.step")
+    assert resumed["id"] == event["id"]
+    assert resumed["status"] == "PENDING"
+    reopened.close()
