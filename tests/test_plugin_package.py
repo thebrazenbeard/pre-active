@@ -43,4 +43,5 @@ def test_plugin_runtime_reference_is_packaged() -> None:
     text = reference.read_text(encoding="utf-8")
     assert reference.is_file()
     assert r"C:\ProgramData\PreActive" in text
+    assert r"C:\ProgramData\PreActive\state\state.db" in text
     assert "status response" in text
