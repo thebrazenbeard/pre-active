@@ -86,6 +86,18 @@ def build_parser() -> argparse.ArgumentParser:
     redrive = sub.add_parser("redrive", help="redrive one exact dead-lettered event")
     redrive.add_argument("event_id")
 
+    pause = sub.add_parser("pause", help="request a durable run pause")
+    pause.add_argument("run_id")
+    pause.add_argument("--reason")
+
+    resume = sub.add_parser("resume", help="resume one paused run")
+    resume.add_argument("run_id")
+    resume.add_argument("--reason")
+
+    cancel = sub.add_parser("cancel", help="request durable run cancellation")
+    cancel.add_argument("run_id")
+    cancel.add_argument("--reason")
+
     for name in ("run-once", "daemon"):
         run = sub.add_parser(name, help="execute the continuous runtime")
         run.add_argument("--base-url")
@@ -163,6 +175,57 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 json.dumps(
                     {"event_id": args.event_id, "status": "PENDING"},
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "pause":
+            store.request_run_control(
+                args.run_id,
+                action="PAUSE",
+                reason=args.reason,
+                now=now,
+            )
+            run = store.get_run(args.run_id)
+            print(
+                json.dumps(
+                    {
+                        "run_id": args.run_id,
+                        "status": run["status"],
+                        "control_action": run["control_action"],
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "resume":
+            store.resume_paused_run(
+                args.run_id,
+                reason=args.reason,
+                now=now,
+            )
+            print(
+                json.dumps(
+                    {"run_id": args.run_id, "status": "RUNNING"},
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "cancel":
+            store.request_run_control(
+                args.run_id,
+                action="CANCEL",
+                reason=args.reason,
+                now=now,
+            )
+            run = store.get_run(args.run_id)
+            print(
+                json.dumps(
+                    {
+                        "run_id": args.run_id,
+                        "status": run["status"],
+                        "control_action": run["control_action"],
+                    },
                     sort_keys=True,
                 )
             )
