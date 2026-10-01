@@ -2,7 +2,7 @@
 
 Observed: 2026-09-25
 Owner scope: `thebrazenbeard`
-Target: `pro-run`
+Target: `pre-active`
 
 ## Method
 
@@ -10,7 +10,7 @@ The accessible portfolio was enumerated from GitHub, yielding 70 repositories. T
 
 Repositories with a strong match were then inspected at tree/source level for exact candidate mechanisms. The sweep is architecture discovery, not evidence that every donor is installed, current at runtime, or suitable for direct code copying.
 
-Because `pro-run` is public, private repositories remain privacy-bound. The internal sweep included them, but this public artifact publishes only aggregate counts and public repository findings.
+Because `pre-active` is public, private repositories remain privacy-bound. The internal sweep included them, but this public artifact publishes only aggregate counts and public repository findings.
 
 Inventory: **70 total = 54 public + 16 private** at the time of the sweep.
 
@@ -20,11 +20,11 @@ Inventory: **70 total = 54 public + 16 private** at the time of the sweep.
 - **SECONDARY** — useful mechanism or operating pattern; incorporated narrowly or reserved as an extension seam.
 - **REFERENCE** — conceptually related, but no V1 runtime dependency or direct mechanism admitted.
 - **NONCORE** — domain-specific, historical, scaffold, or otherwise not needed for the execution kernel.
-- **TARGET** — `pro-run` itself.
+- **TARGET** — `pre-active` itself.
 
 ## Public repositories audited
 
-| Repository | Class | Relevance to Pro-Run |
+| Repository | Class | Relevance to Pre-Active |
 |---|---|---|
 | `ingest` | PRIMARY | deterministic intake, provenance, receipt-oriented normalization |
 | `voss` | SECONDARY | forensic review state and evidence checkpoints |
@@ -52,7 +52,7 @@ Inventory: **70 total = 54 public + 16 private** at the time of the sweep.
 | `vera_model_training` | NONCORE | model-training workbench rather than runtime execution fabric |
 | `testament` | NONCORE | research/literary domain |
 | `abil` | NONCORE | brownfield industrial intelligence product domain |
-| `pro-run` | TARGET | blank target repository at audit start |
+| `pre-active` | TARGET | blank target repository at audit start |
 | `conditioning` | REFERENCE | consent/authority/runtime-effect distinction; historical experiment |
 | `vera-mono` | PRIMARY | lifecycle/effect barriers, explicit source/runtime/effect separation |
 | `project-lantern` | SECONDARY | qualification/orchestration workspace patterns |
@@ -64,7 +64,7 @@ Inventory: **70 total = 54 public + 16 private** at the time of the sweep.
 | `project-achilles` | SECONDARY | security/consequence boundary review discipline |
 | `sql-connectome` | REFERENCE | deterministic routing/translation with execution-authority separation |
 | `hc-brain` | NONCORE | cognitive-organ architecture domain |
-| `rezon` | REFERENCE | reasoning workspace; model-side reasoning remains replaceable in Pro-Run |
+| `rezon` | REFERENCE | reasoning workspace; model-side reasoning remains replaceable in Pre-Active |
 | `world-zero` | NONCORE | systems-modeling domain |
 | `RepairTracker` | SECONDARY | durable repair orchestration and replay/idempotency concerns |
 | `spm` | NONCORE | semantics/pragmatics model research |

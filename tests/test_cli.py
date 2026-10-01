@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from prorun.cli import main
-from prorun.store import Store
+from pre_active.cli import main
+from pre_active.store import Store
 
 
 def test_cli_submit_creates_durable_run_and_event(tmp_path: Path, capsys) -> None:

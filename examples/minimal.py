@@ -1,10 +1,10 @@
 from pathlib import Path
 import tempfile
 
-from prorun.context import ContextAssembler
-from prorun.engine import Engine, ModelResponse
-from prorun.store import Store
-from prorun.tools import ToolRegistry
+from pre_active.context import ContextAssembler
+from pre_active.engine import Engine, ModelResponse
+from pre_active.store import Store
+from pre_active.tools import ToolRegistry
 
 
 class EchoModel:

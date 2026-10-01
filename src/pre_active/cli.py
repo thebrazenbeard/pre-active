@@ -30,10 +30,10 @@ def _submit(store: Store, task: str, capabilities: set[str], now: float) -> str:
 
 
 def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
-    base_url = args.base_url or os.getenv("PRO_RUN_BASE_URL")
-    model_name = args.model or os.getenv("PRO_RUN_MODEL")
+    base_url = args.base_url or os.getenv("PRE_ACTIVE_BASE_URL")
+    model_name = args.model or os.getenv("PRE_ACTIVE_MODEL")
     if not base_url or not model_name:
-        raise SystemExit("run-once/daemon require --base-url and --model (or PRO_RUN_BASE_URL/PRO_RUN_MODEL)")
+        raise SystemExit("run-once/daemon require --base-url and --model (or PRE_ACTIVE_BASE_URL/PRE_ACTIVE_MODEL)")
     api_key = os.getenv(args.api_key_env) if args.api_key_env else None
     model = OpenAICompatibleAdapter(
         base_url=base_url,
@@ -56,8 +56,8 @@ def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pro-run")
-    parser.add_argument("--state", default=".pro-run/state.db", help="SQLite state path")
+    parser = argparse.ArgumentParser(prog="pre-active")
+    parser.add_argument("--state", default=".pre-active/state.db", help="SQLite state path")
     sub = parser.add_subparsers(dest="command", required=True)
 
     submit = sub.add_parser("submit", help="submit a durable task")
@@ -81,11 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
         run = sub.add_parser(name, help="execute the continuous runtime")
         run.add_argument("--base-url")
         run.add_argument("--model")
-        run.add_argument("--api-key-env", default="PRO_RUN_API_KEY")
+        run.add_argument("--api-key-env", default="PRE_ACTIVE_API_KEY")
         run.add_argument("--timeout", type=float, default=120.0)
         run.add_argument("--context-chars", type=int, default=12000)
         run.add_argument("--system-prompt", default="Execute the task using only admitted tools and capabilities.")
-        run.add_argument("--worker-id", default=f"pro-run-{os.getpid()}")
+        run.add_argument("--worker-id", default=f"pre-active-{os.getpid()}")
         run.add_argument("--lease-seconds", type=float, default=30.0)
         run.add_argument("--max-steps", type=int, default=24)
         if name == "daemon":

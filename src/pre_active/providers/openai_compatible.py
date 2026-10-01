@@ -10,7 +10,7 @@ from ..engine import ModelResponse, ToolCall
 class OpenAICompatibleAdapter:
     """Minimal Chat-Completions-compatible model boundary.
 
-    Pro-Run deliberately admits one tool call per model turn. Parallel mutation
+    Pre-Active deliberately admits one tool call per model turn. Parallel mutation
     planning can happen in reasoning, but effect ordering stays explicit and durable.
     """
 
@@ -92,7 +92,7 @@ class OpenAICompatibleAdapter:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "pro-run/0.1",
+            "User-Agent": "pre-active/0.1",
         }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"

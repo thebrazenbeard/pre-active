@@ -1,9 +1,9 @@
 $ErrorActionPreference = "Stop"
 
-$root = if ($env:PRO_RUN_ROOT) { $env:PRO_RUN_ROOT } else { "C:\ProgramData\ProRun" }
+$root = if ($env:PRE_ACTIVE_ROOT) { $env:PRE_ACTIVE_ROOT } else { "C:\ProgramData\PreActive" }
 $log = Join-Path $root "logs\watchdog.log"
 
-foreach ($name in @("ProRun Qwen Endpoint", "ProRun Daemon")) {
+foreach ($name in @("Pre-Active Qwen Endpoint", "Pre-Active Daemon")) {
     try {
         $task = Get-ScheduledTask -TaskName $name -ErrorAction Stop
         if ($task.State -ne "Running") {

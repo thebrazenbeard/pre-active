@@ -18,7 +18,7 @@ No item silently proves the next.
 
 ## Mutation admission
 
-Before invoking a mutating handler, Pro-Run persists:
+Before invoking a mutating handler, Pre-Active persists:
 
 - `request_id`;
 - tool name;
@@ -41,7 +41,7 @@ A request ID is therefore an effect identity, not a casual correlation ID.
 
 ## Run-step decision binding
 
-Mutation idempotency is not sufficient if a retried run step can ask the model to generate a different request ID. Pro-Run therefore persists the exact model decision for `(run_id, step)` before any tool dispatch. A reclaimed/retried step reuses that decision verbatim.
+Mutation idempotency is not sufficient if a retried run step can ask the model to generate a different request ID. Pre-Active therefore persists the exact model decision for `(run_id, step)` before any tool dispatch. A reclaimed/retried step reuses that decision verbatim.
 
 This closes the crash window:
 
@@ -80,15 +80,15 @@ A host calls `ToolRegistry.reconcile` with a SHA-256 digest of external reconcil
 
 ### Effect confirmed
 
-`effect_occurred=True` requires a result object. Pro-Run stores that result and moves the request to `COMMITTED`. Resuming the run replays the committed result into the durable transcript without repeating the handler.
+`effect_occurred=True` requires a result object. Pre-Active stores that result and moves the request to `COMMITTED`. Resuming the run replays the committed result into the durable transcript without repeating the handler.
 
 ### No effect confirmed
 
-`effect_occurred=False` forbids a result object. Pro-Run moves the request to `RECONCILED_NO_EFFECT`. Resuming the run invokes the **exact stored request ID, tool name, and arguments**. It does not ask the model to formulate a replacement call first.
+`effect_occurred=False` forbids a result object. Pre-Active moves the request to `RECONCILED_NO_EFFECT`. Resuming the run invokes the **exact stored request ID, tool name, and arguments**. It does not ask the model to formulate a replacement call first.
 
 ## Evidence ceiling
 
-The reconciliation evidence digest proves only that the host supplied a binding to some external evidence. Pro-Run V1 does not independently validate the truth of that evidence. A production host should bind reconciliation to a trusted readback/verifier appropriate to the target system.
+The reconciliation evidence digest proves only that the host supplied a binding to some external evidence. Pre-Active V1 does not independently validate the truth of that evidence. A production host should bind reconciliation to a trusted readback/verifier appropriate to the target system.
 
 ## Host responsibilities
 
@@ -102,4 +102,4 @@ A tool adapter that mutates an external system should prefer:
 - readback after write;
 - reconciliation probes that are independent from the original response path.
 
-Do not use the Pro-Run request ledger as a substitute for target-native transactional guarantees when those exist.
+Do not use the Pre-Active request ledger as a substitute for target-native transactional guarantees when those exist.
