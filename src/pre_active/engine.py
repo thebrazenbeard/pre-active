@@ -27,6 +27,31 @@ class ModelResponse:
             raise ValueError("model response must contain exactly one of final_text or tool_call")
 
 
+class ModelError(RuntimeError):
+    """Base class for model/provider failures with explicit retry semantics."""
+
+
+class RetryableModelError(ModelError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        if not category.strip():
+            raise ValueError("retryable model error category is required")
+        if retry_after_seconds is not None and retry_after_seconds < 0:
+            raise ValueError("retry_after_seconds must be >= 0")
+        self.category = category
+        self.retry_after_seconds = retry_after_seconds
+
+
+class NonRetryableModelError(ModelError):
+    """Model/provider failure that should not consume infrastructure retries."""
+
+
 class RunControlApplied(RuntimeError):
     """Internal signal that durable run control stopped tool dispatch."""
 
