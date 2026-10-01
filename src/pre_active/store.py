@@ -613,13 +613,51 @@ class Store:
                 if event_cursor.rowcount != 1:
                     raise RuntimeError("paused event resume lost PAUSED state")
             else:
-                self.enqueue_event(
-                    kind="run.step",
-                    payload={"run_id": run_id, "step": step},
-                    priority=priority,
-                    dedup_key=f"run-step:{run_id}:{step}",
-                    now=now,
-                )
+                dedup_key = f"run-step:{run_id}:{step}"
+                existing = self.connection.execute(
+                    """
+                    SELECT id, kind, payload_json, status
+                    FROM events WHERE dedup_key=?
+                    """,
+                    (dedup_key,),
+                ).fetchone()
+                if existing is None:
+                    self.enqueue_event(
+                        kind="run.step",
+                        payload={"run_id": run_id, "step": step},
+                        priority=priority,
+                        dedup_key=dedup_key,
+                        now=now,
+                    )
+                else:
+                    payload = json.loads(existing["payload_json"])
+                    if (
+                        str(existing["kind"]) != "run.step"
+                        or payload.get("run_id") != run_id
+                        or payload.get("step") != step
+                    ):
+                        raise RuntimeError("existing run.step identity does not match paused run")
+                    if str(existing["status"]) != "DONE":
+                        raise RuntimeError(
+                            "paused run successor already exists in nonterminal state"
+                        )
+                    event_cursor = self.connection.execute(
+                        """
+                        UPDATE events
+                        SET status='PENDING', available_at=?, lease_owner=NULL,
+                            lease_until=NULL, lease_token=NULL, updated_at=?
+                        WHERE id=? AND status='DONE'
+                        """,
+                        (now, now, existing["id"]),
+                    )
+                    if event_cursor.rowcount != 1:
+                        raise RuntimeError("paused run could not requeue prior completed step")
+                    self.append_journal(
+                        event_type="EVENT_RESUMED",
+                        subject_id=str(existing["id"]),
+                        payload={"run_id": run_id, "step": step},
+                        now=now,
+                    )
 
             cursor = self.connection.execute(
                 """
@@ -638,6 +676,85 @@ class Store:
                 now=now,
             )
             self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+
+    def apply_blocked_run_control_after_reconciliation(
+        self,
+        run_id: str,
+        *,
+        now: float,
+        effect_completed: bool,
+    ) -> str | None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT status, control_action, control_reason, step_count
+                FROM runs WHERE id=?
+                """,
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            if str(row["status"]) != "BLOCKED_EFFECT":
+                raise RuntimeError("run is not BLOCKED_EFFECT")
+            action = row["control_action"]
+            if action not in {"PAUSE", "CANCEL"}:
+                self.connection.execute("COMMIT")
+                return None
+            reason = row["control_reason"]
+            step_sql = ", step_count=step_count+1" if effect_completed else ""
+
+            if action == "PAUSE":
+                cursor = self.connection.execute(
+                    f"""
+                    UPDATE runs
+                    SET status='PAUSED', blocked_request_id=NULL, control_action=NULL,
+                        paused_event_id=NULL, paused_at=?, last_error=NULL, updated_at=?
+                        {step_sql}
+                    WHERE id=? AND status='BLOCKED_EFFECT' AND control_action='PAUSE'
+                    """,
+                    (now, now, run_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("blocked run pause lost control state")
+                self.append_journal(
+                    event_type="RUN_PAUSED",
+                    subject_id=run_id,
+                    payload={
+                        "reason": reason,
+                        "after_reconciliation": True,
+                        "effect_completed": bool(effect_completed),
+                    },
+                    now=now,
+                )
+            else:
+                cursor = self.connection.execute(
+                    f"""
+                    UPDATE runs
+                    SET status='CANCELLED', blocked_request_id=NULL, control_action=NULL,
+                        paused_event_id=NULL, cancelled_at=?, last_error=NULL, updated_at=?
+                        {step_sql}
+                    WHERE id=? AND status='BLOCKED_EFFECT' AND control_action='CANCEL'
+                    """,
+                    (now, now, run_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("blocked run cancellation lost control state")
+                self.append_journal(
+                    event_type="RUN_CANCELLED",
+                    subject_id=run_id,
+                    payload={
+                        "reason": reason,
+                        "after_reconciliation": True,
+                        "effect_completed": bool(effect_completed),
+                    },
+                    now=now,
+                )
+            self.connection.execute("COMMIT")
+            return str(action)
         except BaseException:
             self.connection.execute("ROLLBACK")
             raise
