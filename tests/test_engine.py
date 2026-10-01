@@ -671,3 +671,53 @@ def test_successful_tool_step_clears_previous_provider_error(tmp_path: Path) -> 
     assert recovered["status"] == "RUNNING"
     assert recovered["step_count"] == 1
     assert recovered["last_error"] is None
+
+
+def test_long_model_call_keeps_event_lease_alive(tmp_path: Path) -> None:
+    import threading
+    import time
+
+    state = tmp_path / "state.db"
+    store = Store(state)
+    tools = ToolRegistry(store)
+
+    class SlowFinalModel:
+        def respond(self, *, messages, tools):
+            time.sleep(0.40)
+            return ModelResponse(final_text="slow but healthy")
+
+    engine = Engine(
+        store=store,
+        model=SlowFinalModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-primary",
+        lease_seconds=0.15,
+    )
+    run_id = engine.submit_task("slow model turn", set(), now=time.time())
+
+    competing_claims = []
+
+    def compete() -> None:
+        time.sleep(0.24)
+        competitor = Store(state)
+        try:
+            competing_claims.append(
+                competitor.claim_event(
+                    worker_id="worker-secondary",
+                    now=time.time(),
+                    lease_seconds=1.0,
+                )
+            )
+        finally:
+            competitor.close()
+
+    contender = threading.Thread(target=compete)
+    contender.start()
+    result = engine.run_once(now=time.time())
+    contender.join(timeout=2.0)
+
+    assert result == run_id
+    assert competing_claims == [None]
+    assert store.get_run(run_id)["status"] == "COMPLETED"
