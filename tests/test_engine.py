@@ -681,10 +681,13 @@ def test_long_model_call_keeps_event_lease_alive(tmp_path: Path) -> None:
     state = tmp_path / "state.db"
     store = Store(state)
     tools = ToolRegistry(store)
+    model_started = threading.Event()
+    release_model = threading.Event()
 
     class SlowFinalModel:
         def respond(self, *, messages, tools):
-            time.sleep(0.90)
+            model_started.set()
+            assert release_model.wait(timeout=3.0)
             return ModelResponse(final_text="slow but healthy")
 
     engine = Engine(
@@ -695,31 +698,52 @@ def test_long_model_call_keeps_event_lease_alive(tmp_path: Path) -> None:
         system_prompt="Run.",
         worker_id="worker-primary",
         lease_seconds=0.40,
-        lease_heartbeat_seconds=0.10,
+        lease_heartbeat_seconds=0.05,
     )
-    run_id = engine.submit_task("slow model turn", set(), now=time.time())
+    run_id = engine.submit_task("slow model turn", set(), now=1.0)
 
     competing_claims = []
+    contender_errors: list[BaseException] = []
 
     def compete() -> None:
-        time.sleep(0.65)
+        assert model_started.wait(timeout=2.0)
         competitor = Store(state)
         try:
+            deadline = time.monotonic() + 2.0
+            renewed_until = 0.0
+            while time.monotonic() < deadline:
+                row = competitor.connection.execute(
+                    "SELECT lease_until FROM events WHERE status='CLAIMED' LIMIT 1"
+                ).fetchone()
+                if row is not None and row["lease_until"] is not None:
+                    renewed_until = float(row["lease_until"])
+                    if renewed_until > 2.45:
+                        break
+                time.sleep(0.01)
+            assert renewed_until > 2.45
+
+            # Test beyond the original 2.40 lease expiry using the queue's
+            # explicit logical clock, not CI wall-clock timing.
             competing_claims.append(
                 competitor.claim_event(
                     worker_id="worker-secondary",
-                    now=time.time(),
+                    now=2.41,
                     lease_seconds=1.0,
                 )
             )
+        except BaseException as exc:
+            contender_errors.append(exc)
         finally:
             competitor.close()
+            release_model.set()
 
     contender = threading.Thread(target=compete)
     contender.start()
-    result = engine.run_once(now=time.time())
-    contender.join(timeout=2.0)
+    result = engine.run_once(now=2.0)
+    contender.join(timeout=3.0)
 
+    assert not contender.is_alive()
+    assert contender_errors == []
     assert result == run_id
     assert competing_claims == [None]
     assert store.get_run(run_id)["status"] == "COMPLETED"
