@@ -152,7 +152,23 @@ class Engine:
         run = self.store.get_run(run_id)
         if run["status"] != "BLOCKED_EFFECT" or not run["blocked_request_id"]:
             raise RuntimeError("run is not blocked on an unresolved effect")
-        request_id = str(run["blocked_request_id"] )
+        request_id = str(run["blocked_request_id"])
+        effect_state = self.tools.effect_state(request_id)
+        control_action = run["control_action"]
+
+        # A reconciled no-effect mutation must not be retried merely to satisfy
+        # recovery when the operator has already asked to pause or cancel.
+        if (
+            control_action in {"PAUSE", "CANCEL"}
+            and effect_state == "RECONCILED_NO_EFFECT"
+        ):
+            self.store.apply_blocked_run_control_after_reconciliation(
+                run_id,
+                now=now,
+                effect_completed=False,
+            )
+            return
+
         result = self.tools.recover_reconciled(
             request_id=request_id,
             allowed_capabilities=run["capabilities"],
@@ -165,6 +181,19 @@ class Engine:
             now=now,
             message_key=f"effect:{request_id}:reconciled-result",
         )
+
+        # Control may have arrived while an exact no-effect retry was already
+        # executing. At that point the operation is allowed to finish and its
+        # result is recorded before control is applied.
+        refreshed = self.store.get_run(run_id)
+        if refreshed["control_action"] in {"PAUSE", "CANCEL"}:
+            self.store.apply_blocked_run_control_after_reconciliation(
+                run_id,
+                now=now,
+                effect_completed=True,
+            )
+            return
+
         self.store.resume_run_after_effect(run_id=run_id, now=now, priority=0)
 
     def run_once(self, *, now: float) -> str | None:
