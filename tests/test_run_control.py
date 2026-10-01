@@ -247,3 +247,228 @@ def test_pause_arriving_during_tool_finishes_result_then_stops_successor(
     assert engine.run_once(now=4.0) == run_id
     assert model.calls == 2
     assert store.get_run(run_id)["status"] == "COMPLETED"
+
+
+def test_cancel_waits_for_effect_reconciliation_and_no_effect_does_not_retry(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state.db"
+    store = Store(state)
+    tools = ToolRegistry(store)
+    attempts = 0
+
+    def ambiguous_write(args):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("response lost after dispatch")
+        return {"written": args["value"]}
+
+    tools.register(
+        ToolSpec(
+            name="record.write",
+            description="write",
+            input_schema={"type": "object", "required": ["value"]},
+            capability="write",
+            mutation=True,
+        ),
+        ambiguous_write,
+    )
+
+    class WriteModel:
+        def respond(self, *, messages, tools):
+            return ModelResponse(
+                tool_call=ToolCall(
+                    request_id="cancel-blocked-effect",
+                    name="record.write",
+                    arguments={"value": 9},
+                )
+            )
+
+    engine = Engine(
+        store=store,
+        model=WriteModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+    )
+    run_id = engine.submit_task("write then cancel", {"write"}, now=1.0)
+    assert engine.run_once(now=2.0) == run_id
+    assert store.get_run(run_id)["status"] == "BLOCKED_EFFECT"
+    assert attempts == 1
+
+    store.request_run_control(
+        run_id,
+        action="CANCEL",
+        reason="operator stop",
+        now=3.0,
+    )
+    pending = store.get_run(run_id)
+    assert pending["status"] == "BLOCKED_EFFECT"
+    assert pending["control_action"] == "CANCEL"
+
+    with pytest.raises(Exception):
+        engine.resume_blocked_effect(run_id, now=3.5)
+    assert store.get_run(run_id)["status"] == "BLOCKED_EFFECT"
+    assert attempts == 1
+
+    tools.reconcile(
+        request_id="cancel-blocked-effect",
+        effect_occurred=False,
+        evidence_digest="a" * 64,
+        now=4.0,
+    )
+    engine.resume_blocked_effect(run_id, now=5.0)
+
+    cancelled = store.get_run(run_id)
+    assert cancelled["status"] == "CANCELLED"
+    assert cancelled["blocked_request_id"] is None
+    assert cancelled["control_action"] is None
+    assert attempts == 1
+
+
+def test_pause_after_no_effect_reconciliation_defers_exact_retry_until_resume(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state.db"
+    store = Store(state)
+    tools = ToolRegistry(store)
+    attempts = 0
+
+    def flaky_write(args):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("unknown first outcome")
+        return {"written": args["value"]}
+
+    tools.register(
+        ToolSpec(
+            name="record.write",
+            description="write",
+            input_schema={"type": "object", "required": ["value"]},
+            capability="write",
+            mutation=True,
+        ),
+        flaky_write,
+    )
+
+    class WriteThenFinal:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def respond(self, *, messages, tools):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    tool_call=ToolCall(
+                        request_id="pause-blocked-effect",
+                        name="record.write",
+                        arguments={"value": 4},
+                    )
+                )
+            return ModelResponse(final_text="done")
+
+    model = WriteThenFinal()
+    engine = Engine(
+        store=store,
+        model=model,
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+    )
+    run_id = engine.submit_task("write then pause", {"write"}, now=1.0)
+    assert engine.run_once(now=2.0) == run_id
+    assert store.get_run(run_id)["status"] == "BLOCKED_EFFECT"
+
+    store.request_run_control(run_id, action="PAUSE", reason="inspect", now=3.0)
+    tools.reconcile(
+        request_id="pause-blocked-effect",
+        effect_occurred=False,
+        evidence_digest="b" * 64,
+        now=4.0,
+    )
+    engine.resume_blocked_effect(run_id, now=5.0)
+
+    paused = store.get_run(run_id)
+    assert paused["status"] == "PAUSED"
+    assert paused["step_count"] == 0
+    assert paused["blocked_request_id"] is None
+    assert attempts == 1
+
+    store.resume_paused_run(run_id, reason="continue", now=6.0)
+    assert engine.run_once(now=7.0) == run_id
+    assert attempts == 2
+    assert store.get_run(run_id)["status"] == "RUNNING"
+    assert store.get_run(run_id)["step_count"] == 1
+
+    assert engine.run_once(now=8.0) == run_id
+    assert model.calls == 2
+    assert store.get_run(run_id)["status"] == "COMPLETED"
+
+
+def test_cancel_after_confirmed_effect_records_result_without_redispatch(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state.db"
+    store = Store(state)
+    tools = ToolRegistry(store)
+    attempts = 0
+
+    def ambiguous_write(args):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("response lost")
+
+    tools.register(
+        ToolSpec(
+            name="record.write",
+            description="write",
+            input_schema={"type": "object", "required": ["value"]},
+            capability="write",
+            mutation=True,
+        ),
+        ambiguous_write,
+    )
+
+    class WriteModel:
+        def respond(self, *, messages, tools):
+            return ModelResponse(
+                tool_call=ToolCall(
+                    request_id="confirmed-cancel",
+                    name="record.write",
+                    arguments={"value": 11},
+                )
+            )
+
+    engine = Engine(
+        store=store,
+        model=WriteModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+    )
+    run_id = engine.submit_task("confirmed effect then cancel", {"write"}, now=1.0)
+    assert engine.run_once(now=2.0) == run_id
+    assert attempts == 1
+
+    store.request_run_control(run_id, action="CANCEL", reason="stop", now=3.0)
+    tools.reconcile(
+        request_id="confirmed-cancel",
+        effect_occurred=True,
+        evidence_digest="c" * 64,
+        result={"written": 11},
+        now=4.0,
+    )
+    engine.resume_blocked_effect(run_id, now=5.0)
+
+    run = store.get_run(run_id)
+    assert run["status"] == "CANCELLED"
+    assert run["step_count"] == 1
+    assert run["blocked_request_id"] is None
+    assert attempts == 1
+    transcript = store.list_run_messages(run_id)
+    assert any("written" in message["content"] for message in transcript)
