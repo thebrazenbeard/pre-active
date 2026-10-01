@@ -386,7 +386,7 @@ class Store:
         try:
             row = self.connection.execute(
                 """
-                SELECT status, control_action, control_reason
+                SELECT status, control_action, control_reason, paused_event_id
                 FROM runs WHERE id=?
                 """,
                 (run_id,),
@@ -402,6 +402,76 @@ class Store:
             if current == normalized and row["control_reason"] == reason:
                 self.connection.execute("COMMIT")
                 return
+
+            if status == "PAUSED":
+                if normalized == "PAUSE":
+                    self.connection.execute(
+                        """
+                        UPDATE runs
+                        SET control_reason=?, control_requested_at=?, updated_at=?
+                        WHERE id=? AND status='PAUSED'
+                        """,
+                        (reason, now, now, run_id),
+                    )
+                    self.append_journal(
+                        event_type="RUN_CONTROL_REQUESTED",
+                        subject_id=run_id,
+                        payload={"action": normalized, "reason": reason},
+                        now=now,
+                    )
+                    self.connection.execute("COMMIT")
+                    return
+
+                paused_event_id = row["paused_event_id"]
+                self.append_journal(
+                    event_type="RUN_CONTROL_REQUESTED",
+                    subject_id=run_id,
+                    payload={"action": normalized, "reason": reason},
+                    now=now,
+                )
+                if paused_event_id is not None:
+                    event_cursor = self.connection.execute(
+                        """
+                        UPDATE events
+                        SET status='CANCELLED', lease_owner=NULL, lease_until=NULL,
+                            lease_token=NULL, updated_at=?
+                        WHERE id=? AND status='PAUSED'
+                        """,
+                        (now, paused_event_id),
+                    )
+                    if event_cursor.rowcount != 1:
+                        raise RuntimeError("paused run cancellation lost paused event")
+                    self.append_journal(
+                        event_type="EVENT_CANCELLED",
+                        subject_id=str(paused_event_id),
+                        payload={"run_id": run_id, "from_paused": True},
+                        now=now,
+                    )
+                run_cursor = self.connection.execute(
+                    """
+                    UPDATE runs
+                    SET status='CANCELLED', control_action=NULL, control_reason=?,
+                        control_requested_at=?, paused_event_id=NULL, cancelled_at=?,
+                        updated_at=?
+                    WHERE id=? AND status='PAUSED'
+                    """,
+                    (reason, now, now, now, run_id),
+                )
+                if run_cursor.rowcount != 1:
+                    raise RuntimeError("paused run cancellation lost PAUSED state")
+                self.append_journal(
+                    event_type="RUN_CANCELLED",
+                    subject_id=run_id,
+                    payload={
+                        "reason": reason,
+                        "from_paused": True,
+                        "event_id": paused_event_id,
+                    },
+                    now=now,
+                )
+                self.connection.execute("COMMIT")
+                return
+
             self.connection.execute(
                 """
                 UPDATE runs
