@@ -2,6 +2,7 @@ from pathlib import Path
 
 from pre_active.context import ContextAssembler
 from pre_active.engine import Engine, ModelResponse, ToolCall
+from pre_active.lease import LeaseLost
 from pre_active.store import Store
 from pre_active.tools import ToolRegistry, ToolSpec
 
@@ -761,3 +762,37 @@ def test_retry_exhaustion_dead_letters_event_and_fails_run(tmp_path: Path) -> No
     run = store.get_run(run_id)
     assert run["status"] == "FAILED"
     assert "provider remains unavailable" in run["last_error"]
+
+
+def test_lease_extension_ceiling_blocks_stale_model_decision_persistence(tmp_path: Path) -> None:
+    import time
+    import pytest
+
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class TooSlowModel:
+        def respond(self, *, messages, tools):
+            time.sleep(0.35)
+            return ModelResponse(final_text="late response")
+
+    engine = Engine(
+        store=store,
+        model=TooSlowModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+        lease_seconds=1.0,
+        lease_heartbeat_seconds=0.05,
+        max_lease_extension_seconds=0.15,
+    )
+    run_id = engine.submit_task("do not persist stale decision", set(), now=time.time())
+
+    with pytest.raises(LeaseLost, match="maximum lease extension elapsed"):
+        engine.run_once(now=time.time())
+
+    assert store.get_run_step_decision(run_id=run_id, step=0) is None
+    run = store.get_run(run_id)
+    assert run["status"] == "RUNNING"
+    assert "LeaseLost" in run["last_error"]
