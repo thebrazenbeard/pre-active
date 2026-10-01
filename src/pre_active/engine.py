@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 from typing import Any, Protocol
 
@@ -25,6 +26,25 @@ class ModelResponse:
     def __post_init__(self) -> None:
         if (self.final_text is None) == (self.tool_call is None):
             raise ValueError("model response must contain exactly one of final_text or tool_call")
+
+
+def _model_retry_delay_seconds(
+    *,
+    event_id: str,
+    attempts: int,
+    retry_after_seconds: float | None,
+) -> float:
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1")
+    base = min(60.0, 2.0 ** min(int(attempts), 6))
+    digest = hashlib.sha256(f"{event_id}:{attempts}".encode("utf-8")).digest()
+    jitter = int.from_bytes(digest[:8], "big") / float(1 << 64)
+    computed = base + jitter
+    if retry_after_seconds is None:
+        return computed
+    if retry_after_seconds < 0:
+        raise ValueError("retry_after_seconds must be >= 0")
+    return max(computed, float(retry_after_seconds))
 
 
 class ModelError(RuntimeError):
@@ -553,6 +573,42 @@ class Engine:
                             now=transition_now,
                         )
                 return run_id
+        except RetryableModelError as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            transition_now = heartbeat.current_time()
+            self.store.update_run(run_id, now=transition_now, last_error=error)
+            retry_delay = _model_retry_delay_seconds(
+                event_id=event.id,
+                attempts=event.attempts,
+                retry_after_seconds=exc.retry_after_seconds,
+            )
+            dead_lettered = self.store.fail_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=transition_now,
+                retry_at=transition_now + retry_delay,
+                max_attempts=self.max_event_attempts,
+                error=error,
+                failed_run_id=run_id,
+            )
+            self.store.append_journal(
+                event_type=(
+                    "MODEL_FAILURE_DEAD_LETTERED"
+                    if dead_lettered
+                    else "MODEL_FAILURE_RETRY_SCHEDULED"
+                ),
+                subject_id=run_id,
+                payload={
+                    "event_id": event.id,
+                    "category": exc.category,
+                    "attempt": event.attempts,
+                    "retry_after_seconds": exc.retry_after_seconds,
+                    "retry_delay_seconds": retry_delay,
+                },
+                now=transition_now,
+            )
+            raise
         except NonRetryableModelError as exc:
             error = f"{type(exc).__name__}: {exc}"
             with self.store.active_claim_transaction(
