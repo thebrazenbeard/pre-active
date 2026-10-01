@@ -1,0 +1,27 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "pre-active",
+  "version": "0.1.0",
+  "description": "ChatGPT control and diagnostic surface for the Pre-Active durable execution runtime.",
+  "author": {
+    "name": "Patrick Sims",
+    "url": "https://github.com/thebrazenbeard"
+  },
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Pre-Active",
+        "shortDescription": "Durable runtime control",
+        "longDescription": "Inspect, submit, schedule, and safely operate Pre-Active durable work through a verified workstation runtime. The plugin preserves effect boundaries and never treats queued work as proof of an external effect.",
+        "developerName": "Patrick Sims",
+        "category": "Productivity",
+        "capabilities": ["Interactive"],
+        "defaultPrompt": [
+          "Check my Pre-Active runtime and tell me what is actually running.",
+          "Show me the durable Pre-Active queue and run state.",
+          "Help me submit work to Pre-Active without overstating what it can do."
+        ]
+      }
+    }
+  }
+}
