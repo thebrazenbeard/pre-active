@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import sqlite3
 import uuid
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 
 _SCHEMA = """
@@ -371,24 +371,33 @@ class Store:
         *,
         worker_id: str,
         lease_token: str,
-        now: float,
-    ) -> Iterator[None]:
+        now: float | Callable[[], float],
+        validate: Callable[[], None] | None = None,
+    ) -> Iterator[float]:
         if self.connection.in_transaction:
             raise RuntimeError("active claim transaction cannot be nested")
+
+        def current_time() -> float:
+            return float(now() if callable(now) else now)
+
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            started_at = current_time()
             self._require_active_claim(
                 event_id,
                 worker_id=worker_id,
                 lease_token=lease_token,
-                now=now,
+                now=started_at,
             )
-            yield
+            yield started_at
+            if validate is not None:
+                validate()
+            finished_at = current_time()
             self._require_active_claim(
                 event_id,
                 worker_id=worker_id,
                 lease_token=lease_token,
-                now=now,
+                now=finished_at,
             )
             self.connection.execute("COMMIT")
         except BaseException:
