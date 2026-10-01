@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS runs (
     last_error TEXT,
     blocked_request_id TEXT,
     source_event_id TEXT UNIQUE,
+    failed_event_id TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -125,6 +126,8 @@ class Store:
             self.connection.execute("ALTER TABLE runs ADD COLUMN blocked_request_id TEXT")
         if "source_event_id" not in run_columns:
             self.connection.execute("ALTER TABLE runs ADD COLUMN source_event_id TEXT")
+        if "failed_event_id" not in run_columns:
+            self.connection.execute("ALTER TABLE runs ADD COLUMN failed_event_id TEXT")
         self.connection.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS runs_source_event_idx ON runs(source_event_id) "
             "WHERE source_event_id IS NOT NULL"
@@ -343,6 +346,7 @@ class Store:
             "final_text": row["final_text"],
             "last_error": row["last_error"],
             "blocked_request_id": row["blocked_request_id"],
+            "failed_event_id": row["failed_event_id"],
         }
 
     def _require_active_claim(
@@ -753,10 +757,10 @@ class Store:
                     run_cursor = self.connection.execute(
                         """
                         UPDATE runs
-                        SET status='FAILED', last_error=?, updated_at=?
+                        SET status='FAILED', last_error=?, failed_event_id=?, updated_at=?
                         WHERE id=? AND status='RUNNING'
                         """,
-                        (error, now, failed_run_id),
+                        (error, event_id, now, failed_run_id),
                     )
                     if run_cursor.rowcount != 1:
                         raise RuntimeError(
@@ -797,6 +801,111 @@ class Store:
             self.connection.execute("ROLLBACK")
             raise
         return dead_lettered
+
+    def list_dead_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        rows = self.connection.execute(
+            """
+            SELECT * FROM events
+            WHERE status='DEAD'
+            ORDER BY dead_lettered_at ASC, created_at ASC, id ASC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "kind": str(row["kind"]),
+                "payload": json.loads(row["payload_json"]),
+                "dedup_key": row["dedup_key"],
+                "attempts": int(row["attempts"]),
+                "last_error": row["last_error"],
+                "dead_lettered_at": row["dead_lettered_at"],
+            }
+            for row in rows
+        ]
+
+    def redrive_event(self, event_id: str, *, now: float) -> None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT * FROM events WHERE id=? AND status='DEAD'",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("event is not dead-lettered")
+
+            prior_attempts = int(row["attempts"])
+            prior_error = row["last_error"]
+            prior_dead_lettered_at = row["dead_lettered_at"]
+            payload = json.loads(row["payload_json"])
+
+            if str(row["kind"]) == "run.step":
+                run_id = payload.get("run_id")
+                step = payload.get("step")
+                if not isinstance(run_id, str) or not isinstance(step, int):
+                    raise RuntimeError("dead run.step payload is malformed")
+                run = self.connection.execute(
+                    """
+                    SELECT status, step_count, failed_event_id
+                    FROM runs WHERE id=?
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if (
+                    run is None
+                    or str(run["status"]) != "FAILED"
+                    or run["failed_event_id"] != event_id
+                    or int(run["step_count"]) != step
+                ):
+                    raise RuntimeError(
+                        "dead run.step is not bound to its exact failed run generation"
+                    )
+                run_cursor = self.connection.execute(
+                    """
+                    UPDATE runs
+                    SET status='RUNNING', last_error=NULL, failed_event_id=NULL, updated_at=?
+                    WHERE id=? AND status='FAILED' AND failed_event_id=? AND step_count=?
+                    """,
+                    (now, run_id, event_id, step),
+                )
+                if run_cursor.rowcount != 1:
+                    raise RuntimeError("run redrive lost exact failed-run binding")
+                self.append_journal(
+                    event_type="RUN_REDRIVEN",
+                    subject_id=run_id,
+                    payload={"event_id": event_id, "step": step},
+                    now=now,
+                )
+
+            cursor = self.connection.execute(
+                """
+                UPDATE events
+                SET status='PENDING', available_at=?, lease_owner=NULL, lease_until=NULL,
+                    lease_token=NULL, attempts=0, last_error=NULL,
+                    dead_lettered_at=NULL, updated_at=?
+                WHERE id=? AND status='DEAD'
+                """,
+                (now, now, event_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("event redrive lost dead-letter state")
+            self.append_journal(
+                event_type="EVENT_REDRIVEN",
+                subject_id=event_id,
+                payload={
+                    "prior_attempts": prior_attempts,
+                    "prior_error": prior_error,
+                    "prior_dead_lettered_at": prior_dead_lettered_at,
+                },
+                now=now,
+            )
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
 
     def list_events(self, *, kind: str | None = None) -> list[dict[str, Any]]:
         if kind is None:
