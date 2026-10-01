@@ -202,11 +202,16 @@ def test_expired_claim_cannot_ack_or_retry_without_reclaim(tmp_path: Path) -> No
             now=3.1,
         )
 
-    retry_id = store.enqueue_event(kind="retry-expiry", payload={}, now=4.0)
-    retry_claim = store.claim_event(worker_id="w2", now=5.0, lease_seconds=1.0)
+    store.close()
+
+    retry_store = Store(tmp_path / "retry.db")
+    retry_id = retry_store.enqueue_event(kind="retry-expiry", payload={}, now=4.0)
+    retry_claim = retry_store.claim_event(
+        worker_id="w2", now=5.0, lease_seconds=1.0
+    )
     assert retry_claim is not None and retry_claim.id == retry_id and retry_claim.lease_token
     with pytest.raises(RuntimeError, match="lost lease ownership"):
-        store.fail_event(
+        retry_store.fail_event(
             retry_id,
             worker_id="w2",
             lease_token=retry_claim.lease_token,
