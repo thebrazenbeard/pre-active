@@ -1,7 +1,13 @@
 from pathlib import Path
 
 from pre_active.context import ContextAssembler
-from pre_active.engine import Engine, ModelResponse, ToolCall
+from pre_active.engine import (
+    Engine,
+    ModelResponse,
+    NonRetryableModelError,
+    RetryableModelError,
+    ToolCall,
+)
 from pre_active.lease import LeaseLost
 from pre_active.store import Store
 from pre_active.tools import ToolRegistry, ToolSpec
@@ -870,3 +876,150 @@ def test_final_progress_is_not_committed_after_claim_expires_during_persistence(
     assert run["status"] == "RUNNING"
     assert run["step_count"] == 0
     assert run["final_text"] is None
+
+
+def test_model_error_contract_distinguishes_retryable_and_permanent_failures() -> None:
+    import pre_active.engine as engine_module
+
+    assert hasattr(engine_module, "RetryableModelError")
+    assert hasattr(engine_module, "NonRetryableModelError")
+
+    retryable = engine_module.RetryableModelError(
+        "rate limited",
+        category="throttling",
+        retry_after_seconds=12.0,
+    )
+    assert retryable.category == "throttling"
+    assert retryable.retry_after_seconds == 12.0
+    assert isinstance(engine_module.NonRetryableModelError("bad auth"), RuntimeError)
+
+
+def test_non_retryable_model_error_fails_run_and_consumes_event(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class BadAuthModel:
+        def respond(self, *, messages, tools):
+            raise NonRetryableModelError("provider authentication rejected")
+
+    engine = Engine(
+        store=store,
+        model=BadAuthModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+    )
+    run_id = engine.submit_task("do not churn on bad auth", set(), now=1.0)
+
+    assert engine.run_once(now=2.0) == run_id
+
+    run = store.get_run(run_id)
+    assert run["status"] == "FAILED"
+    assert "NonRetryableModelError" in run["last_error"]
+    [event] = store.list_events(kind="run.step")
+    assert event["status"] == "DONE"
+    assert event["attempts"] == 1
+    assert store.pending_event_count() == 0
+    assert any(
+        entry["event_type"] == "MODEL_FAILURE_TERMINAL"
+        for entry in store.list_journal(subject_id=run_id)
+    )
+
+
+def test_retryable_model_error_keeps_run_pending_for_retry(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class ThrottledModel:
+        def respond(self, *, messages, tools):
+            raise RetryableModelError(
+                "provider throttled",
+                category="throttling",
+                retry_after_seconds=12.0,
+            )
+
+    engine = Engine(
+        store=store,
+        model=ThrottledModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+        max_event_attempts=4,
+    )
+    run_id = engine.submit_task("retry after throttle", set(), now=1.0)
+
+    import pytest
+
+    with pytest.raises(RetryableModelError, match="provider throttled"):
+        engine.run_once(now=2.0)
+
+    run = store.get_run(run_id)
+    assert run["status"] == "RUNNING"
+    assert "RetryableModelError" in run["last_error"]
+    [event] = store.list_events(kind="run.step")
+    assert event["status"] == "PENDING"
+    assert event["attempts"] == 1
+
+
+def test_retryable_model_error_honors_retry_after_as_minimum_delay(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class BusyModel:
+        def respond(self, *, messages, tools):
+            raise RetryableModelError(
+                "come back later",
+                category="throttling",
+                retry_after_seconds=12.0,
+            )
+
+    engine = Engine(
+        store=store,
+        model=BusyModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+    )
+    engine.submit_task("respect retry-after", set(), now=1.0)
+
+    import pytest
+
+    with pytest.raises(RetryableModelError):
+        engine.run_once(now=2.0)
+
+    row = store.connection.execute(
+        "SELECT available_at, attempts FROM events WHERE kind='run.step'"
+    ).fetchone()
+    assert row is not None
+    assert row["attempts"] == 1
+    assert 14.0 <= row["available_at"] < 15.0
+
+
+def test_retryable_model_backoff_adds_stable_subsecond_jitter() -> None:
+    import pre_active.engine as engine_module
+
+    assert hasattr(engine_module, "_model_retry_delay_seconds")
+
+    first = engine_module._model_retry_delay_seconds(
+        event_id="event-a",
+        attempts=1,
+        retry_after_seconds=None,
+    )
+    repeated = engine_module._model_retry_delay_seconds(
+        event_id="event-a",
+        attempts=1,
+        retry_after_seconds=None,
+    )
+    other = engine_module._model_retry_delay_seconds(
+        event_id="event-b",
+        attempts=1,
+        retry_after_seconds=None,
+    )
+
+    assert first == repeated
+    assert 2.0 <= first < 3.0
+    assert 2.0 <= other < 3.0
+    assert first != other

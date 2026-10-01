@@ -1,10 +1,54 @@
 from __future__ import annotations
 
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 import json
+import socket
+import time
 from typing import Any
-from urllib import request
+from urllib import error, request
 
-from ..engine import ModelResponse, ToolCall
+from ..engine import (
+    ModelResponse,
+    NonRetryableModelError,
+    RetryableModelError,
+    ToolCall,
+)
+
+
+_RETRYABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
+
+
+def _parse_retry_after(value: str | None, *, now: float | None = None) -> float | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if stripped.isdigit():
+        return float(stripped)
+    try:
+        parsed = parsedate_to_datetime(stripped)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    current = time.time() if now is None else float(now)
+    return max(0.0, parsed.timestamp() - current)
+
+
+def _http_model_error(exc: error.HTTPError) -> RuntimeError:
+    retry_after = _parse_retry_after(
+        exc.headers.get("Retry-After") if exc.headers is not None else None
+    )
+    if exc.code in _RETRYABLE_HTTP_STATUSES:
+        category = "throttling" if exc.code == 429 else "transient"
+        return RetryableModelError(
+            f"provider HTTP {exc.code}: {exc.reason}",
+            category=category,
+            retry_after_seconds=retry_after,
+        )
+    return NonRetryableModelError(f"provider HTTP {exc.code}: {exc.reason}")
 
 
 class OpenAICompatibleAdapter:
@@ -102,9 +146,21 @@ class OpenAICompatibleAdapter:
             headers=headers,
             method="POST",
         )
-        with request.urlopen(req, timeout=self.timeout_seconds) as response:
-            raw = response.read()
-        parsed = json.loads(raw.decode("utf-8"))
-        if not isinstance(parsed, dict):
-            raise ValueError("provider response must be a JSON object")
-        return self.parse_response(parsed)
+        try:
+            with request.urlopen(req, timeout=self.timeout_seconds) as response:
+                raw = response.read()
+        except error.HTTPError as exc:
+            raise _http_model_error(exc) from exc
+        except (error.URLError, TimeoutError, socket.timeout) as exc:
+            raise RetryableModelError(
+                f"provider transport failure: {exc}",
+                category="transport",
+            ) from exc
+
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+            if not isinstance(parsed, dict):
+                raise ValueError("provider response must be a JSON object")
+            return self.parse_response(parsed)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise NonRetryableModelError(f"provider response invalid: {exc}") from exc

@@ -24,6 +24,7 @@ The repository description calls this a continuous execution environment for LLM
 - Per-step durable model-decision fencing before any tool dispatch.
 - Salience/relevance-based memory selection under a bounded context budget.
 - A provider-neutral model interface plus a minimal OpenAI-compatible adapter.
+- Typed provider failure semantics: known transient transport/HTTP failures retry with bounded backoff, stable jitter, and `Retry-After` support; known permanent client/protocol failures fail fast instead of burning the queue retry budget.
 - Structured tool admission by explicit capability and a fail-closed JSON-Schema-compatible validation subset.
 - Exactly one admitted tool call per model turn for deterministic effect ordering.
 - A durable mutation ledger keyed by request ID and canonical request digest.
@@ -142,6 +143,8 @@ pre-active --state .pre-active/state.db daemon --poll-seconds 1
 # --max-lease-extension-seconds 900
 # --max-event-attempts 16
 ```
+
+For the bundled OpenAI-compatible adapter, network/timeouts and HTTP `408`, `429`, `500`, `502`, `503`, and `504` are treated as retryable provider failures. Other HTTP `4xx` responses and malformed provider protocol/JSON are terminal for that run. Retryable provider failures retain the existing event-attempt ceiling, add deterministic per-event jitter, and honor a valid HTTP `Retry-After` value as a minimum delay.
 
 Schedule a recurring task:
 
