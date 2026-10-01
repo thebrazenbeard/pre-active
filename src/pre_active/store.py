@@ -392,13 +392,6 @@ class Store:
             yield started_at
             if validate is not None:
                 validate()
-            finished_at = current_time()
-            self._require_active_claim(
-                event_id,
-                worker_id=worker_id,
-                lease_token=lease_token,
-                now=finished_at,
-            )
             self.connection.execute("COMMIT")
         except BaseException:
             self.connection.execute("ROLLBACK")
