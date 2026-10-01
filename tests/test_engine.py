@@ -721,3 +721,42 @@ def test_long_model_call_keeps_event_lease_alive(tmp_path: Path) -> None:
     assert result == run_id
     assert competing_claims == [None]
     assert store.get_run(run_id)["status"] == "COMPLETED"
+
+
+def test_retry_exhaustion_dead_letters_event_and_fails_run(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class AlwaysFailModel:
+        def respond(self, *, messages, tools):
+            raise RuntimeError("provider remains unavailable")
+
+    engine = Engine(
+        store=store,
+        model=AlwaysFailModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+        max_event_attempts=2,
+    )
+    run_id = engine.submit_task("eventually stop retrying", set(), now=1.0)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="provider remains unavailable"):
+        engine.run_once(now=2.0)
+    [first_event] = store.list_events(kind="run.step")
+    assert first_event["status"] == "PENDING"
+    assert store.get_run(run_id)["status"] == "RUNNING"
+
+    with pytest.raises(RuntimeError, match="provider remains unavailable"):
+        engine.run_once(now=5.0)
+
+    [dead_event] = store.list_events(kind="run.step")
+    assert dead_event["status"] == "DEAD"
+    assert dead_event["attempts"] == 2
+    assert "provider remains unavailable" in dead_event["last_error"]
+    run = store.get_run(run_id)
+    assert run["status"] == "FAILED"
+    assert "provider remains unavailable" in run["last_error"]
