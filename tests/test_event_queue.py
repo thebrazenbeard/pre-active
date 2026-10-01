@@ -72,3 +72,65 @@ def test_event_dedup_key_is_bound_to_exact_semantic_request(tmp_path: Path) -> N
             dedup_key="same-key",
             now=3.0,
         )
+
+
+def test_reclaimed_event_rotates_fencing_token_and_rejects_stale_claim(tmp_path: Path) -> None:
+    import pytest
+
+    store = Store(tmp_path / "state.db")
+    event_id = store.enqueue_event(
+        kind="probe",
+        payload={"value": 1},
+        dedup_key="fenced-probe",
+        now=1.0,
+    )
+
+    first = store.claim_event(worker_id="worker-a", now=2.0, lease_seconds=5.0)
+    assert first is not None
+    assert first.lease_token
+
+    renewed_until = store.renew_event_lease(
+        first.id,
+        worker_id="worker-a",
+        lease_token=first.lease_token,
+        now=4.0,
+        lease_seconds=5.0,
+    )
+    assert renewed_until == 9.0
+    assert store.claim_event(worker_id="worker-b", now=8.0, lease_seconds=5.0) is None
+
+    recovered = store.claim_event(worker_id="worker-b", now=10.0, lease_seconds=5.0)
+    assert recovered is not None
+    assert recovered.id == event_id
+    assert recovered.lease_token
+    assert recovered.lease_token != first.lease_token
+
+    with pytest.raises(RuntimeError, match="lost lease ownership"):
+        store.renew_event_lease(
+            first.id,
+            worker_id="worker-a",
+            lease_token=first.lease_token,
+            now=10.5,
+            lease_seconds=5.0,
+        )
+    with pytest.raises(RuntimeError, match="lost lease ownership"):
+        store.ack_event(
+            first.id,
+            worker_id="worker-a",
+            lease_token=first.lease_token,
+            now=10.5,
+        )
+    with pytest.raises(RuntimeError, match="lost lease ownership"):
+        store.fail_event(
+            first.id,
+            worker_id="worker-a",
+            lease_token=first.lease_token,
+            now=10.5,
+        )
+
+    store.ack_event(
+        recovered.id,
+        worker_id="worker-b",
+        lease_token=recovered.lease_token,
+        now=11.0,
+    )
