@@ -61,6 +61,8 @@ Pause and cancel are durable cooperative control. The operator writes control in
 
 A cancel request does not terminate a worker process or prove an already-dispatched external operation stopped. If control arrives while a tool is executing, its result is classified first. An ambiguous mutation remains `BLOCKED_EFFECT`; reconciliation outranks pause/cancel. `RECONCILED_NO_EFFECT` plus pending control does not re-dispatch the mutation merely to complete recovery.
 
+If a PAUSE request is still pending on a `RUNNING` run and has not reached a safe boundary, `resume` may atomically withdraw that pending PAUSE without disturbing the current event. A pending CANCEL cannot be withdrawn through resume.
+
 `max_steps` bounds runaway tool/reasoning cycles. `max_event_attempts` bounds transient retry loops; the default is 16 attempts, deliberately above the historical ten-attempt backend-recovery observation recorded for the Windows runtime.
 
 ### Context assembler
