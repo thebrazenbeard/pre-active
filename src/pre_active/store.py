@@ -730,6 +730,12 @@ class Store:
         ).fetchone()
         return int(row["n"])
 
+    def dead_event_count(self) -> int:
+        row = self.connection.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE status='DEAD'"
+        ).fetchone()
+        return int(row["n"])
+
     def claim_event(
         self, *, worker_id: str, now: float, lease_seconds: float
     ) -> Event | None:
