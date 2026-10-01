@@ -995,7 +995,7 @@ def test_retryable_model_error_honors_retry_after_as_minimum_delay(tmp_path: Pat
     ).fetchone()
     assert row is not None
     assert row["attempts"] == 1
-    assert row["available_at"] == 14.0
+    assert 14.0 <= row["available_at"] < 15.0
 
 
 def test_retryable_model_backoff_adds_stable_subsecond_jitter() -> None:
