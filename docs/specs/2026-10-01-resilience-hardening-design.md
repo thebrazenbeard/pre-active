@@ -4,10 +4,11 @@ Status: implementation target for `feature/resilience-leases-dlq-v1-20261001`.
 
 ## Problem
 
-Pre-Active already persists queue state, run generations, model decisions, tool effects, and explicit ambiguous-effect recovery. Two reliability gaps remain load-bearing:
+Pre-Active already persists queue state, run generations, model decisions, tool effects, and explicit ambiguous-effect recovery. Three reliability gaps are load-bearing:
 
 1. event ownership is represented only by `lease_owner` + `lease_until`; there is no per-claim fencing token and no lease renewal while a long model/tool operation is active;
-2. retry scheduling is exponential but unbounded; a permanently failing event can cycle forever and a run can remain indefinitely nonterminal.
+2. retry scheduling is exponential but unbounded; a permanently failing event can cycle forever and a run can remain indefinitely nonterminal;
+3. once bounded retry creates a dead-letter state, operators need an explicit inspection/redrive path or recovery degrades into manual SQLite editing.
 
 The default CLI currently permits a 120-second model timeout with a 30-second event lease, so a healthy model request can outlive its queue ownership window.
 
@@ -37,6 +38,10 @@ Heartbeat ownership has a maximum extension duration. Once that ceiling is reach
 
 No heartbeat itself grants effect authority. Existing tool-effect fencing remains authoritative for mutations.
 
+### Fenced durable progress
+
+A heartbeat assertion alone leaves a check-then-write race. Fresh model decisions and run-progress commits therefore revalidate the exact event claim while holding the SQLite write lock. The heartbeat's bounded-extension assertion is checked again before commit. Tool-result/run-generation/successor/ACK and final-completion/ACK transitions are grouped so stale workers cannot advance durable run state after losing ownership.
+
 ### Bounded retry and dead-letter state
 
 Unexpected retryable execution failures keep the existing exponential backoff, but only up to a configurable `max_event_attempts`. When the current attempt reaches that ceiling:
@@ -48,6 +53,12 @@ Unexpected retryable execution failures keep the existing exponential backoff, b
 - an associated running run is moved to `FAILED`.
 
 The default attempt ceiling is 16, deliberately above the previously observed ten-attempt GPU-contention recovery case.
+
+### Explicit dead-letter inspection and redrive
+
+Dead events remain durable and inspectable. Redrive is manual and one event at a time; it resets attempts while preserving event identity and dedup binding.
+
+For a dead `run.step`, the associated run records the exact dead-letter event ID. Redrive may resume the run only when that ID and the run generation still match, preventing accidental resurrection of an unrelated or subsequently changed failed run.
 
 ### Compatibility and scope
 
@@ -70,6 +81,14 @@ This change does not claim exactly-once external effects. The existing invariant
 > **HOSTILE REVIEWER:** A claim token does not make external effects exactly once.
 
 **ACCEPTED.** It only fences queue ownership. External mutations remain governed by the existing effect ledger and reconciliation barrier.
+
+> **HOSTILE REVIEWER:** A pre-write heartbeat check still permits a stale worker to commit if the lease expires during persistence.
+
+**ACCEPTED.** Run progress is committed inside a claim-validating SQLite transaction with heartbeat revalidation before commit.
+
+> **HOSTILE REVIEWER:** Dead-lettering without redrive just trades an infinite retry loop for manual database surgery.
+
+**ACCEPTED.** Dead events are inspectable and may be explicitly redriven one at a time; run resurrection requires an exact failure binding.
 
 ## Claim ceiling
 
