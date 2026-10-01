@@ -5,7 +5,8 @@ import json
 from typing import Any, Protocol
 
 from .context import ContextAssembler
-from .store import Store
+from .lease import LeaseHeartbeat, LeaseLost
+from .store import Event, Store
 from .tools import AmbiguousEffect, ToolError, ToolRegistry
 
 
@@ -76,6 +77,8 @@ class Engine:
         system_prompt: str,
         worker_id: str,
         lease_seconds: float = 30.0,
+        lease_heartbeat_seconds: float | None = None,
+        max_lease_extension_seconds: float = 900.0,
         max_steps: int = 24,
     ) -> None:
         self.store = store
@@ -85,6 +88,8 @@ class Engine:
         self.system_prompt = system_prompt
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
+        self.lease_heartbeat_seconds = lease_heartbeat_seconds
+        self.max_lease_extension_seconds = max_lease_extension_seconds
         self.max_steps = max_steps
 
     def submit_task(
@@ -144,6 +149,25 @@ class Engine:
             return None
         if not event.lease_token:
             raise RuntimeError("claimed event missing lease token")
+        heartbeat = LeaseHeartbeat(
+            state_path=self.store.path,
+            event_id=event.id,
+            worker_id=self.worker_id,
+            lease_token=event.lease_token,
+            lease_seconds=self.lease_seconds,
+            heartbeat_seconds=self.lease_heartbeat_seconds,
+            max_extension_seconds=self.max_lease_extension_seconds,
+        )
+        with heartbeat:
+            return self._run_claimed_event(event=event, now=now, heartbeat=heartbeat)
+
+    def _run_claimed_event(
+        self,
+        *,
+        event: Event,
+        now: float,
+        heartbeat: LeaseHeartbeat,
+    ) -> str | None:
         if event.kind == "task.requested":
             task = event.payload.get("task")
             capabilities = event.payload.get("capabilities", [])
@@ -215,6 +239,7 @@ class Engine:
                 )
             else:
                 response = _response_from_decision(stored_decision)
+            heartbeat.assert_owned()
             if response.tool_call is not None:
                 call = response.tool_call
                 self.store.record_run_message(
@@ -235,6 +260,7 @@ class Engine:
                         allowed_capabilities=run["capabilities"],
                         now=now,
                     )
+                    heartbeat.assert_owned()
                 except BaseException as exc:
                     effect_state = self.tools.effect_state(call.request_id)
                     if effect_state in {"EXECUTING", "ATTEMPTED_UNKNOWN"}:
@@ -292,6 +318,9 @@ class Engine:
                 )
             self.store.ack_event(event.id, worker_id=self.worker_id, lease_token=event.lease_token, now=now)
             return run_id
+        except LeaseLost as exc:
+            self.store.update_run(run_id, now=now, last_error=f"{type(exc).__name__}: {exc}")
+            raise
         except BaseException as exc:
             self.store.update_run(run_id, now=now, last_error=f"{type(exc).__name__}: {exc}")
             self.store.fail_event(
