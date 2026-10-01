@@ -13,7 +13,10 @@ The repository description calls this a continuous execution environment for LLM
 ## What V1 provides
 
 - SQLite/WAL durable state with a lease-based event queue.
+- Fresh fencing tokens on every event claim/reclaim so stale workers cannot acknowledge, renew, or reschedule work they no longer own.
+- Bounded lease heartbeats keep healthy long model/tool operations owned without granting permanent ownership.
 - Event deduplication bound to exact kind/payload/priority, plus recovery after expired worker leases.
+- Bounded retry with configurable attempt ceilings, durable `DEAD` state, failure evidence, dead-letter inspection, and explicit single-event redrive.
 - Interval schedules that emit idempotent events.
 - Durable runs and idempotently keyed run transcripts across model turns.
 - Atomic run creation + initial-step scheduling, with source-event-to-run binding so redelivered wakeups reuse the same run.
@@ -131,6 +134,12 @@ Run continuously:
 
 ```bash
 pre-active --state .pre-active/state.db daemon --poll-seconds 1
+
+# Optional reliability controls:
+# --lease-seconds 30
+# --lease-heartbeat-seconds 10
+# --max-lease-extension-seconds 900
+# --max-event-attempts 16
 ```
 
 Schedule a recurring task:
@@ -140,6 +149,15 @@ pre-active --state .pre-active/state.db schedule \
   "Review the durable queue" \
   --every 300
 ```
+
+Inspect and explicitly redrive exhausted work:
+
+```bash
+pre-active --state .pre-active/state.db dead
+pre-active --state .pre-active/state.db redrive <event-id>
+```
+
+Redrive is intentionally one event at a time. It resets that event's attempt count and preserves its identity/dedup binding. A dead `run.step` may resume its run only when the event is recorded as the exact cause of that exact failed run generation.
 
 The CLI intentionally does not expose arbitrary shell execution. Host applications register their own tools through `ToolRegistry`, with each tool bound to a named capability and an explicit `mutation` classification.
 
@@ -178,6 +196,7 @@ src/pre_active/
   context.py                 bounded context + memory assembly
   daemon.py                  scheduler/engine continuous loop
   engine.py                  durable ReAct-style execution loop
+  lease.py                   bounded fenced-claim heartbeat
   scheduler.py               interval event triggers
   store.py                   SQLite queue, runs, memory, journal
   tools.py                   capability gate + effect/idempotency ledger

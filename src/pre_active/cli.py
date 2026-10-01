@@ -50,6 +50,9 @@ def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
         system_prompt=args.system_prompt,
         worker_id=args.worker_id,
         lease_seconds=args.lease_seconds,
+        lease_heartbeat_seconds=args.lease_heartbeat_seconds,
+        max_lease_extension_seconds=args.max_lease_extension_seconds,
+        max_event_attempts=args.max_event_attempts,
         max_steps=args.max_steps,
     )
     return Daemon(scheduler=Scheduler(store), engine=engine)
@@ -77,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="show durable queue/run status")
 
+    dead = sub.add_parser("dead", help="list dead-lettered events")
+    dead.add_argument("--limit", type=int, default=100)
+
+    redrive = sub.add_parser("redrive", help="redrive one exact dead-lettered event")
+    redrive.add_argument("event_id")
+
     for name in ("run-once", "daemon"):
         run = sub.add_parser(name, help="execute the continuous runtime")
         run.add_argument("--base-url")
@@ -87,6 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
         run.add_argument("--system-prompt", default="Execute the task using only admitted tools and capabilities.")
         run.add_argument("--worker-id", default=f"pre-active-{os.getpid()}")
         run.add_argument("--lease-seconds", type=float, default=30.0)
+        run.add_argument("--lease-heartbeat-seconds", type=float)
+        run.add_argument("--max-lease-extension-seconds", type=float, default=900.0)
+        run.add_argument("--max-event-attempts", type=int, default=16)
         run.add_argument("--max-steps", type=int, default=24)
         if name == "daemon":
             run.add_argument("--poll-seconds", type=float, default=1.0)
@@ -131,8 +143,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 json.dumps(
                     {
                         "pending_events": store.pending_event_count(),
+                        "dead_events": store.dead_event_count(),
                         "runs": {str(row["status"]): int(row["n"]) for row in rows},
                     },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "dead":
+            print(
+                json.dumps(
+                    {"events": store.list_dead_events(limit=args.limit)},
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "redrive":
+            store.redrive_event(args.event_id, now=now)
+            print(
+                json.dumps(
+                    {"event_id": args.event_id, "status": "PENDING"},
                     sort_keys=True,
                 )
             )

@@ -5,7 +5,8 @@ import json
 from typing import Any, Protocol
 
 from .context import ContextAssembler
-from .store import Store
+from .lease import LeaseHeartbeat, LeaseLost
+from .store import Event, EventLeaseLost, Store
 from .tools import AmbiguousEffect, ToolError, ToolRegistry
 
 
@@ -76,6 +77,9 @@ class Engine:
         system_prompt: str,
         worker_id: str,
         lease_seconds: float = 30.0,
+        lease_heartbeat_seconds: float | None = None,
+        max_lease_extension_seconds: float = 900.0,
+        max_event_attempts: int = 16,
         max_steps: int = 24,
     ) -> None:
         self.store = store
@@ -85,6 +89,11 @@ class Engine:
         self.system_prompt = system_prompt
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
+        self.lease_heartbeat_seconds = lease_heartbeat_seconds
+        if max_event_attempts < 1:
+            raise ValueError("max_event_attempts must be >= 1")
+        self.max_lease_extension_seconds = max_lease_extension_seconds
+        self.max_event_attempts = int(max_event_attempts)
         self.max_steps = max_steps
 
     def submit_task(
@@ -142,6 +151,28 @@ class Engine:
         )
         if event is None:
             return None
+        if not event.lease_token:
+            raise RuntimeError("claimed event missing lease token")
+        heartbeat = LeaseHeartbeat(
+            state_path=self.store.path,
+            event_id=event.id,
+            worker_id=self.worker_id,
+            lease_token=event.lease_token,
+            claimed_at=now,
+            lease_seconds=self.lease_seconds,
+            heartbeat_seconds=self.lease_heartbeat_seconds,
+            max_extension_seconds=self.max_lease_extension_seconds,
+        )
+        with heartbeat:
+            return self._run_claimed_event(event=event, now=now, heartbeat=heartbeat)
+
+    def _run_claimed_event(
+        self,
+        *,
+        event: Event,
+        now: float,
+        heartbeat: LeaseHeartbeat,
+    ) -> str | None:
         if event.kind == "task.requested":
             task = event.payload.get("task")
             capabilities = event.payload.get("capabilities", [])
@@ -152,7 +183,12 @@ class Engine:
                     payload={"reason": "task.requested task must be a non-empty string"},
                     now=now,
                 )
-                self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+                self.store.ack_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time(),
+            )
                 return None
             if not isinstance(capabilities, list) or not all(
                 isinstance(item, str) for item in capabilities
@@ -163,7 +199,12 @@ class Engine:
                     payload={"reason": "task.requested capabilities must be a list of strings"},
                     now=now,
                 )
-                self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+                self.store.ack_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time(),
+            )
                 return None
             run_id = self.submit_task(
                 task.strip(),
@@ -171,29 +212,61 @@ class Engine:
                 now=now,
                 source_event_id=event.id,
             )
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time(),
+            )
             return run_id
         if event.kind != "run.step":
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time(),
+            )
             return None
 
         run_id = str(event.payload["run_id"])
         run = self.store.get_run(run_id)
         event_step = event.payload.get("step")
         if not isinstance(event_step, int) or event_step != run["step_count"]:
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time(),
+            )
             return run_id
         if run["status"] != "RUNNING":
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time(),
+            )
             return run_id
         if run["step_count"] >= self.max_steps:
-            self.store.update_run(
-                run_id,
-                now=now,
-                status="FAILED",
-                last_error="max_steps exceeded",
-            )
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            with self.store.active_claim_transaction(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time,
+                validate=heartbeat.assert_owned,
+            ) as transition_now:
+                self.store.update_run(
+                    run_id,
+                    now=transition_now,
+                    status="FAILED",
+                    last_error="max_steps exceeded",
+                )
+                self.store.ack_event(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=transition_now,
+                )
             return run_id
 
         try:
@@ -205,26 +278,42 @@ class Engine:
                     messages=self._messages_for_run(run),
                     tools=self.tools.specs(run["capabilities"]),
                 )
-                self.store.record_run_step_decision(
-                    run_id=run_id,
-                    step=run["step_count"],
-                    decision=_decision_from_response(response),
-                    now=now,
-                )
+                heartbeat.assert_owned()
+                with self.store.active_claim_transaction(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=heartbeat.current_time,
+                    validate=heartbeat.assert_owned,
+                ) as transition_now:
+                    self.store.record_run_step_decision(
+                        run_id=run_id,
+                        step=run["step_count"],
+                        decision=_decision_from_response(response),
+                        now=transition_now,
+                    )
             else:
                 response = _response_from_decision(stored_decision)
+            heartbeat.assert_owned()
             if response.tool_call is not None:
                 call = response.tool_call
-                self.store.record_run_message(
-                    run_id=run_id,
-                    role="assistant",
-                    content=(
-                        f"tool_call id={call.request_id} name={call.name} "
-                        f"arguments={json.dumps(call.arguments, sort_keys=True)}"
-                    ),
-                    now=now,
-                    message_key=f"step:{run['step_count']}:assistant-decision",
-                )
+                with self.store.active_claim_transaction(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=heartbeat.current_time,
+                    validate=heartbeat.assert_owned,
+                ) as transition_now:
+                    self.store.record_run_message(
+                        run_id=run_id,
+                        role="assistant",
+                        content=(
+                            f"tool_call id={call.request_id} name={call.name} "
+                            f"arguments={json.dumps(call.arguments, sort_keys=True)}"
+                        ),
+                        now=transition_now,
+                        message_key=f"step:{run['step_count']}:assistant-decision",
+                    )
                 try:
                     result = self.tools.execute(
                         name=call.name,
@@ -233,69 +322,126 @@ class Engine:
                         allowed_capabilities=run["capabilities"],
                         now=now,
                     )
+                    heartbeat.assert_owned()
                 except BaseException as exc:
                     effect_state = self.tools.effect_state(call.request_id)
                     if effect_state in {"EXECUTING", "ATTEMPTED_UNKNOWN"}:
-                        self.store.block_run_on_effect(
-                            run_id=run_id,
-                            request_id=call.request_id,
-                            error=f"{type(exc).__name__}: {exc}",
-                            now=now,
-                        )
-                        self.store.ack_event(
-                            event.id, worker_id=self.worker_id, now=now
-                        )
+                        with self.store.active_claim_transaction(
+                            event.id,
+                            worker_id=self.worker_id,
+                            lease_token=event.lease_token,
+                            now=heartbeat.current_time,
+                            validate=heartbeat.assert_owned,
+                        ) as transition_now:
+                            self.store.block_run_on_effect(
+                                run_id=run_id,
+                                request_id=call.request_id,
+                                error=f"{type(exc).__name__}: {exc}",
+                                now=transition_now,
+                            )
+                            self.store.ack_event(
+                                event.id,
+                                worker_id=self.worker_id,
+                                lease_token=event.lease_token,
+                                now=transition_now,
+                            )
                         return run_id
                     if isinstance(exc, ToolError):
-                        self.store.update_run(
-                            run_id,
-                            now=now,
-                            status="FAILED",
-                            last_error=f"{type(exc).__name__}: {exc}",
-                        )
-                        self.store.ack_event(
-                            event.id, worker_id=self.worker_id, now=now
-                        )
+                        with self.store.active_claim_transaction(
+                            event.id,
+                            worker_id=self.worker_id,
+                            lease_token=event.lease_token,
+                            now=heartbeat.current_time,
+                            validate=heartbeat.assert_owned,
+                        ) as transition_now:
+                            self.store.update_run(
+                                run_id,
+                                now=transition_now,
+                                status="FAILED",
+                                last_error=f"{type(exc).__name__}: {exc}",
+                            )
+                            self.store.ack_event(
+                                event.id,
+                                worker_id=self.worker_id,
+                                lease_token=event.lease_token,
+                                now=transition_now,
+                            )
                         return run_id
                     raise
-                self.store.record_run_message(
-                    run_id=run_id,
-                    role="tool",
-                    content=f"{call.name} => {json.dumps(result.output, sort_keys=True)}",
-                    now=now,
-                    message_key=f"step:{run['step_count']}:tool-result",
-                )
-                self.store.advance_run_step(
-                    run_id=run_id,
-                    expected_step=run["step_count"],
-                    priority=event.priority,
-                    now=now,
-                )
+                with self.store.active_claim_transaction(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=heartbeat.current_time,
+                    validate=heartbeat.assert_owned,
+                ) as transition_now:
+                    self.store.record_run_message(
+                        run_id=run_id,
+                        role="tool",
+                        content=f"{call.name} => {json.dumps(result.output, sort_keys=True)}",
+                        now=transition_now,
+                        message_key=f"step:{run['step_count']}:tool-result",
+                    )
+                    self.store.advance_run_step(
+                        run_id=run_id,
+                        expected_step=run["step_count"],
+                        priority=event.priority,
+                        now=transition_now,
+                    )
+                    self.store.ack_event(
+                        event.id,
+                        worker_id=self.worker_id,
+                        lease_token=event.lease_token,
+                        now=transition_now,
+                    )
+                return run_id
             else:
                 assert response.final_text is not None
-                self.store.record_run_message(
-                    run_id=run_id,
-                    role="assistant",
-                    content=response.final_text,
-                    now=now,
-                    message_key=f"step:{run['step_count']}:assistant-final",
-                )
-                self.store.update_run(
-                    run_id,
-                    now=now,
-                    status="COMPLETED",
-                    final_text=response.final_text,
-                    clear_last_error=True,
-                    increment_step=True,
-                )
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
-            return run_id
-        except BaseException as exc:
+                with self.store.active_claim_transaction(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=heartbeat.current_time,
+                    validate=heartbeat.assert_owned,
+                ) as transition_now:
+                    self.store.record_run_message(
+                        run_id=run_id,
+                        role="assistant",
+                        content=response.final_text,
+                        now=transition_now,
+                        message_key=f"step:{run['step_count']}:assistant-final",
+                    )
+                    self.store.complete_run_step(
+                        run_id=run_id,
+                        expected_step=run["step_count"],
+                        final_text=response.final_text,
+                        now=transition_now,
+                    )
+                    self.store.ack_event(
+                        event.id,
+                        worker_id=self.worker_id,
+                        lease_token=event.lease_token,
+                        now=transition_now,
+                    )
+                return run_id
+        except EventLeaseLost as exc:
+            raise LeaseLost(str(exc)) from exc
+        except LeaseLost as exc:
             self.store.update_run(run_id, now=now, last_error=f"{type(exc).__name__}: {exc}")
+            raise
+        except BaseException as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            self.store.update_run(run_id, now=now, last_error=error)
+            transition_now = heartbeat.current_time()
             self.store.fail_event(
                 event.id,
                 worker_id=self.worker_id,
-                now=now,
-                retry_at=now + min(60.0, 2.0 ** min(event.attempts, 6)),
+                lease_token=event.lease_token,
+                now=transition_now,
+                retry_at=transition_now
+                + min(60.0, 2.0 ** min(event.attempts, 6)),
+                max_attempts=self.max_event_attempts,
+                error=error,
+                failed_run_id=run_id,
             )
             raise

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 from pathlib import Path
 import sqlite3
 import uuid
-from typing import Any
+from typing import Any, Callable, Iterator
 
 
 _SCHEMA = """
@@ -20,7 +21,10 @@ CREATE TABLE IF NOT EXISTS events (
     available_at REAL NOT NULL,
     lease_owner TEXT,
     lease_until REAL,
+    lease_token TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    dead_lettered_at REAL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -45,6 +49,7 @@ CREATE TABLE IF NOT EXISTS runs (
     last_error TEXT,
     blocked_request_id TEXT,
     source_event_id TEXT UNIQUE,
+    failed_event_id TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -85,6 +90,10 @@ CREATE INDEX IF NOT EXISTS journal_subject_idx ON journal(subject_id, seq);
 """
 
 
+class EventLeaseLost(RuntimeError):
+    """Raised when a fenced event claim is no longer active."""
+
+
 @dataclass(frozen=True)
 class Event:
     id: str
@@ -95,6 +104,7 @@ class Event:
     attempts: int
     lease_owner: str | None
     lease_until: float | None
+    lease_token: str | None
 
 
 class Store:
@@ -104,11 +114,20 @@ class Store:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.executescript(_SCHEMA)
+        event_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(events)")}
+        if "lease_token" not in event_columns:
+            self.connection.execute("ALTER TABLE events ADD COLUMN lease_token TEXT")
+        if "last_error" not in event_columns:
+            self.connection.execute("ALTER TABLE events ADD COLUMN last_error TEXT")
+        if "dead_lettered_at" not in event_columns:
+            self.connection.execute("ALTER TABLE events ADD COLUMN dead_lettered_at REAL")
         run_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(runs)")}
         if "blocked_request_id" not in run_columns:
             self.connection.execute("ALTER TABLE runs ADD COLUMN blocked_request_id TEXT")
         if "source_event_id" not in run_columns:
             self.connection.execute("ALTER TABLE runs ADD COLUMN source_event_id TEXT")
+        if "failed_event_id" not in run_columns:
+            self.connection.execute("ALTER TABLE runs ADD COLUMN failed_event_id TEXT")
         self.connection.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS runs_source_event_idx ON runs(source_event_id) "
             "WHERE source_event_id IS NOT NULL"
@@ -327,7 +346,60 @@ class Store:
             "final_text": row["final_text"],
             "last_error": row["last_error"],
             "blocked_request_id": row["blocked_request_id"],
+            "failed_event_id": row["failed_event_id"],
         }
+
+    def _require_active_claim(
+        self,
+        event_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        now: float,
+    ) -> None:
+        row = self.connection.execute(
+            """
+            SELECT 1 FROM events
+            WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+              AND lease_until IS NOT NULL AND lease_until > ?
+            """,
+            (event_id, worker_id, lease_token, now),
+        ).fetchone()
+        if row is None:
+            raise EventLeaseLost("event progress commit lost lease ownership")
+
+    @contextmanager
+    def active_claim_transaction(
+        self,
+        event_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        now: float | Callable[[], float],
+        validate: Callable[[], None] | None = None,
+    ) -> Iterator[float]:
+        if self.connection.in_transaction:
+            raise RuntimeError("active claim transaction cannot be nested")
+
+        def current_time() -> float:
+            return float(now() if callable(now) else now)
+
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            started_at = current_time()
+            self._require_active_claim(
+                event_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                now=started_at,
+            )
+            yield started_at
+            if validate is not None:
+                validate()
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
 
     def update_run(
         self, run_id: str, *, now: float, status: str | None = None,
@@ -364,7 +436,9 @@ class Store:
         now: float,
     ) -> int:
         next_step = int(expected_step) + 1
-        self.connection.execute("BEGIN IMMEDIATE")
+        owns_transaction = not self.connection.in_transaction
+        if owns_transaction:
+            self.connection.execute("BEGIN IMMEDIATE")
         try:
             cursor = self.connection.execute(
                 """
@@ -383,11 +457,33 @@ class Store:
                 dedup_key=f"run-step:{run_id}:{next_step}",
                 now=now,
             )
-            self.connection.execute("COMMIT")
+            if owns_transaction:
+                self.connection.execute("COMMIT")
         except BaseException:
-            self.connection.execute("ROLLBACK")
+            if owns_transaction:
+                self.connection.execute("ROLLBACK")
             raise
         return next_step
+
+    def complete_run_step(
+        self,
+        *,
+        run_id: str,
+        expected_step: int,
+        final_text: str,
+        now: float,
+    ) -> None:
+        cursor = self.connection.execute(
+            """
+            UPDATE runs
+            SET status='COMPLETED', final_text=?, last_error=NULL,
+                step_count=step_count+1, updated_at=?
+            WHERE id=? AND status='RUNNING' AND step_count=?
+            """,
+            (final_text, now, run_id, int(expected_step)),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("run completion lost expected generation")
 
     def block_run_on_effect(
         self, *, run_id: str, request_id: str, error: str, now: float
@@ -554,16 +650,50 @@ class Store:
             for _, _, _, row in scored[:limit]
         ]
 
-    def ack_event(self, event_id: str, *, worker_id: str, now: float) -> None:
+    def renew_event_lease(
+        self,
+        event_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        now: float,
+        lease_seconds: float,
+    ) -> float:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be > 0")
+        lease_until = now + lease_seconds
         cursor = self.connection.execute(
             """
-            UPDATE events SET status='DONE', lease_owner=NULL, lease_until=NULL, updated_at=?
-            WHERE id=? AND status='CLAIMED' AND lease_owner=?
+            UPDATE events
+            SET lease_until=?, updated_at=?
+            WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+              AND lease_until IS NOT NULL AND lease_until > ?
             """,
-            (now, event_id, worker_id),
+            (lease_until, now, event_id, worker_id, lease_token, now),
         )
         if cursor.rowcount != 1:
-            raise RuntimeError("event acknowledgement lost lease ownership")
+            raise EventLeaseLost("event lease renewal lost lease ownership")
+        return lease_until
+
+    def ack_event(
+        self,
+        event_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        now: float,
+    ) -> None:
+        cursor = self.connection.execute(
+            """
+            UPDATE events
+            SET status='DONE', lease_owner=NULL, lease_until=NULL, lease_token=NULL, updated_at=?
+            WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+              AND lease_until IS NOT NULL AND lease_until > ?
+            """,
+            (now, event_id, worker_id, lease_token, now),
+        )
+        if cursor.rowcount != 1:
+            raise EventLeaseLost("event acknowledgement lost lease ownership")
         self.append_journal(
             event_type="EVENT_ACKED",
             subject_id=event_id,
@@ -571,22 +701,211 @@ class Store:
             now=now,
         )
 
-    def fail_event(self, event_id: str, *, worker_id: str, now: float, retry_at: float | None = None) -> None:
-        cursor = self.connection.execute(
+    def fail_event(
+        self,
+        event_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        now: float,
+        retry_at: float | None = None,
+        max_attempts: int | None = None,
+        error: str | None = None,
+        failed_run_id: str | None = None,
+    ) -> bool:
+        if max_attempts is not None and max_attempts < 1:
+            raise ValueError("max_attempts must be >= 1")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT attempts FROM events
+                WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+                  AND lease_until IS NOT NULL AND lease_until > ?
+                """,
+                (event_id, worker_id, lease_token, now),
+            ).fetchone()
+            if row is None:
+                raise EventLeaseLost("event failure update lost lease ownership")
+            dead_lettered = (
+                max_attempts is not None and int(row["attempts"]) >= max_attempts
+            )
+            if dead_lettered:
+                cursor = self.connection.execute(
+                    """
+                    UPDATE events
+                    SET status='DEAD', lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                        last_error=?, dead_lettered_at=?, updated_at=?
+                    WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+                    """,
+                    (error, now, now, event_id, worker_id, lease_token),
+                )
+                if cursor.rowcount != 1:
+                    raise EventLeaseLost("event dead-letter update lost lease ownership")
+                self.append_journal(
+                    event_type="EVENT_DEAD_LETTERED",
+                    subject_id=event_id,
+                    payload={
+                        "worker_id": worker_id,
+                        "attempts": int(row["attempts"]),
+                        "max_attempts": max_attempts,
+                        "error": error,
+                    },
+                    now=now,
+                )
+                if failed_run_id is not None:
+                    run_cursor = self.connection.execute(
+                        """
+                        UPDATE runs
+                        SET status='FAILED', last_error=?, failed_event_id=?, updated_at=?
+                        WHERE id=? AND status='RUNNING'
+                        """,
+                        (error, event_id, now, failed_run_id),
+                    )
+                    if run_cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "dead-letter run transition requires one RUNNING run"
+                        )
+            else:
+                effective_retry_at = now if retry_at is None else retry_at
+                cursor = self.connection.execute(
+                    """
+                    UPDATE events
+                    SET status='PENDING', lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                        available_at=?, last_error=?, dead_lettered_at=NULL, updated_at=?
+                    WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+                    """,
+                    (
+                        effective_retry_at,
+                        error,
+                        now,
+                        event_id,
+                        worker_id,
+                        lease_token,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise EventLeaseLost("event failure update lost lease ownership")
+                self.append_journal(
+                    event_type="EVENT_RETRY_SCHEDULED",
+                    subject_id=event_id,
+                    payload={
+                        "worker_id": worker_id,
+                        "retry_at": effective_retry_at,
+                        "error": error,
+                    },
+                    now=now,
+                )
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+        return dead_lettered
+
+    def list_dead_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        rows = self.connection.execute(
             """
-            UPDATE events SET status='PENDING', lease_owner=NULL, lease_until=NULL, available_at=?, updated_at=?
-            WHERE id=? AND status='CLAIMED' AND lease_owner=?
+            SELECT * FROM events
+            WHERE status='DEAD'
+            ORDER BY dead_lettered_at ASC, created_at ASC, id ASC
+            LIMIT ?
             """,
-            (now if retry_at is None else retry_at, now, event_id, worker_id),
-        )
-        if cursor.rowcount != 1:
-            raise RuntimeError("event failure update lost lease ownership")
-        self.append_journal(
-            event_type="EVENT_RETRY_SCHEDULED",
-            subject_id=event_id,
-            payload={"worker_id": worker_id, "retry_at": now if retry_at is None else retry_at},
-            now=now,
-        )
+            (int(limit),),
+        ).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "kind": str(row["kind"]),
+                "payload": json.loads(row["payload_json"]),
+                "dedup_key": row["dedup_key"],
+                "attempts": int(row["attempts"]),
+                "last_error": row["last_error"],
+                "dead_lettered_at": row["dead_lettered_at"],
+            }
+            for row in rows
+        ]
+
+    def redrive_event(self, event_id: str, *, now: float) -> None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT * FROM events WHERE id=? AND status='DEAD'",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("event is not dead-lettered")
+
+            prior_attempts = int(row["attempts"])
+            prior_error = row["last_error"]
+            prior_dead_lettered_at = row["dead_lettered_at"]
+            payload = json.loads(row["payload_json"])
+
+            if str(row["kind"]) == "run.step":
+                run_id = payload.get("run_id")
+                step = payload.get("step")
+                if not isinstance(run_id, str) or not isinstance(step, int):
+                    raise RuntimeError("dead run.step payload is malformed")
+                run = self.connection.execute(
+                    """
+                    SELECT status, step_count, failed_event_id
+                    FROM runs WHERE id=?
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if (
+                    run is None
+                    or str(run["status"]) != "FAILED"
+                    or run["failed_event_id"] != event_id
+                    or int(run["step_count"]) != step
+                ):
+                    raise RuntimeError(
+                        "dead run.step is not bound to its exact failed run generation"
+                    )
+                run_cursor = self.connection.execute(
+                    """
+                    UPDATE runs
+                    SET status='RUNNING', last_error=NULL, failed_event_id=NULL, updated_at=?
+                    WHERE id=? AND status='FAILED' AND failed_event_id=? AND step_count=?
+                    """,
+                    (now, run_id, event_id, step),
+                )
+                if run_cursor.rowcount != 1:
+                    raise RuntimeError("run redrive lost exact failed-run binding")
+                self.append_journal(
+                    event_type="RUN_REDRIVEN",
+                    subject_id=run_id,
+                    payload={"event_id": event_id, "step": step},
+                    now=now,
+                )
+
+            cursor = self.connection.execute(
+                """
+                UPDATE events
+                SET status='PENDING', available_at=?, lease_owner=NULL, lease_until=NULL,
+                    lease_token=NULL, attempts=0, last_error=NULL,
+                    dead_lettered_at=NULL, updated_at=?
+                WHERE id=? AND status='DEAD'
+                """,
+                (now, now, event_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("event redrive lost dead-letter state")
+            self.append_journal(
+                event_type="EVENT_REDRIVEN",
+                subject_id=event_id,
+                payload={
+                    "prior_attempts": prior_attempts,
+                    "prior_error": prior_error,
+                    "prior_dead_lettered_at": prior_dead_lettered_at,
+                },
+                now=now,
+            )
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
 
     def list_events(self, *, kind: str | None = None) -> list[dict[str, Any]]:
         if kind is None:
@@ -605,6 +924,8 @@ class Store:
                 "dedup_key": row["dedup_key"],
                 "status": str(row["status"]),
                 "attempts": int(row["attempts"]),
+                "last_error": row["last_error"],
+                "dead_lettered_at": row["dead_lettered_at"],
             }
             for row in rows
         ]
@@ -615,9 +936,17 @@ class Store:
         ).fetchone()
         return int(row["n"])
 
+    def dead_event_count(self) -> int:
+        row = self.connection.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE status='DEAD'"
+        ).fetchone()
+        return int(row["n"])
+
     def claim_event(
         self, *, worker_id: str, now: float, lease_seconds: float
     ) -> Event | None:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be > 0")
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             row = self.connection.execute(
@@ -638,13 +967,15 @@ class Store:
                 return None
             attempts = int(row["attempts"]) + 1
             lease_until = now + lease_seconds
+            lease_token = str(uuid.uuid4())
             self.connection.execute(
                 """
                 UPDATE events
-                SET status='CLAIMED', lease_owner=?, lease_until=?, attempts=?, updated_at=?
+                SET status='CLAIMED', lease_owner=?, lease_until=?, lease_token=?,
+                    attempts=?, updated_at=?
                 WHERE id=?
                 """,
-                (worker_id, lease_until, attempts, now, row["id"]),
+                (worker_id, lease_until, lease_token, attempts, now, row["id"]),
             )
             self.append_journal(
                 event_type="EVENT_CLAIMED",
@@ -665,4 +996,5 @@ class Store:
             attempts=attempts,
             lease_owner=worker_id,
             lease_until=lease_until,
+            lease_token=lease_token,
         )

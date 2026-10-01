@@ -15,12 +15,14 @@ The architecture is intentionally self-contained. Portfolio repositories influen
 `pre_active.store.Store` uses SQLite in WAL mode. It persists:
 
 - event queue entries and worker leases;
-- task runs, source-event bindings, idempotently keyed durable transcripts, and per-step model decisions;
+- task runs, source-event bindings, dead-letter failure bindings, idempotently keyed durable transcripts, and per-step model decisions;
 - memory records with salience;
 - interval schedules;
 - append-only journal entries.
 
-Queue work is claimed under `BEGIN IMMEDIATE`. An expired lease can be reclaimed by another worker. A lease is not ownership forever; it is a bounded execution claim. Event deduplication keys are durably bound to canonical kind + payload + priority; reusing a key for different intent fails closed.
+Queue work is claimed under `BEGIN IMMEDIATE`. Every successful claim receives a fresh opaque fencing token. Acknowledgement, retry/dead-letter transition, and renewal require the exact event ID + worker ID + fencing token, so a stale worker cannot complete a claim after another worker reclaims it. An expired lease can be reclaimed by another worker with a new token. A lease is not ownership forever; it is a bounded execution claim. Event deduplication keys are durably bound to canonical kind + payload + priority; reusing a key for different intent fails closed.
+
+`pre_active.lease.LeaseHeartbeat` renews the exact active claim on a dedicated SQLite connection while model/tool work can block longer than the original lease. Renewal is bounded by `max_lease_extension_seconds`; reaching the ceiling or losing the exact claim makes the heartbeat fail closed. Lease ownership is queue coordination only and does not confer capability or effect authority.
 
 ### Scheduler
 
@@ -33,10 +35,10 @@ Queue work is claimed under `BEGIN IMMEDIATE`. An expired lease can be reclaimed
 1. claim one durable event;
 2. atomically create an idempotently source-bound durable run plus its initial `run.step`, or load an existing `run.step`;
 3. assemble bounded context from system prompt, current task, durable transcript, and relevant memory;
-4. load the already-admitted model decision for this run generation, or ask the model for exactly one of: final text or one structured tool call and persist that decision before dispatch;
+4. load the already-admitted model decision for this run generation, or ask the model for exactly one of: final text or one structured tool call; durable admission of a fresh decision occurs only inside a transaction that proves the exact event claim is still active;
 5. pass tool calls through bounded JSON-Schema-compatible validation, capability admission, and the effect ledger;
-6. persist the result under a stable per-step transcript key;
-7. atomically advance the run generation and schedule its successor event, or close the run. Effect-recovery resumes use the same atomic advance + successor rule.
+6. persist tool/final results under stable per-step transcript keys;
+7. under the same fenced claim transaction, atomically commit the run-generation transition, successor event (when needed), and current-event acknowledgement. Effect-recovery resumes use the same atomic advance + successor rule.
 
 A run has these operational states:
 
@@ -48,7 +50,7 @@ RUNNING -> COMPLETED
    +----> BLOCKED_EFFECT -> RUNNING  (only after reconciliation)
 ```
 
-`max_steps` bounds runaway tool/reasoning cycles.
+`max_steps` bounds runaway tool/reasoning cycles. `max_event_attempts` bounds transient retry loops; the default is 16 attempts, deliberately above the historical ten-attempt backend-recovery observation recorded for the Windows runtime.
 
 ### Context assembler
 
@@ -105,14 +107,18 @@ See `docs/EFFECT_AND_RECOVERY.md`.
 ## Event state machine
 
 ```text
-PENDING --claim--> CLAIMED --ack--> DONE
-   ^                  |
-   |                  +--failure--> PENDING at retry_at
-   |                  |
-   +---lease expiry---+
+PENDING --claim(token N)--> CLAIMED --ack(token N)--> DONE
+   ^                          |  |
+   |                          |  +--attempt ceiling--> DEAD
+   |                          |                         |
+   |                          |                         +--explicit redrive--> PENDING
+   |                          |
+   |                          +--failure below ceiling--> PENDING at retry_at
+   |                          |
+   +----lease expiry / reclaim with fresh token----------+
 ```
 
-Claim priority is deterministic: higher `priority`, then older creation time.
+A heartbeat may extend an unexpired matching claim, but only up to the configured maximum extension duration. Durable model decisions and run-progress commits revalidate the exact claim while holding the SQLite write lock, so a stale worker cannot advance a run after ownership is lost. `DEAD` events retain `last_error`, `dead_lettered_at`, attempt count, and an `EVENT_DEAD_LETTERED` journal record. Redrive is explicit and single-event; it resets attempts while preserving event identity and dedup binding. A dead `run.step` resumes only when its event ID is bound as the exact cause of the exact failed run generation. Claim priority remains deterministic: higher `priority`, then older creation time.
 
 ## Crash model
 
@@ -122,7 +128,7 @@ Pre-Active is designed around process death at arbitrary points:
 - death after claim but before completion: lease expires and event becomes reclaimable;
 - death during initial submission: run creation and initial-step scheduling roll back together;
 - death after `task.requested` creates a run but before source-event ACK: redelivery reuses the same source-bound run;
-- death after model inference: the persisted run-step decision is reused instead of asking the model to mint a replacement tool request;
+- death after model inference: a decision is admitted only while the exact event claim is valid; once admitted, the persisted run-step decision is reused instead of asking the model to mint a replacement tool request;
 - death after a read-only call: the same admitted model decision can be retried;
 - death after mutation admission but before committed result: effect remains unresolved and blocks blind replay;
 - death after a committed mutation but before step advancement: the same persisted request ID replays the stored result;
@@ -158,13 +164,14 @@ V1 does not claim canonical JSON interoperability with every language/runtime. C
 
 Pre-Active distinguishes:
 
-- provider/model failure: retryable through the queue with bounded exponential delay;
+- provider/model failure: retryable through the queue with bounded exponential delay and a configurable attempt ceiling; exhaustion dead-letters the event and fails an associated running run;
 - daemon cycle exception: reported to stderr and polling continues after the engine has durably classified/requeued the work; `KeyboardInterrupt`/`SystemExit` still terminate normally;
 - malformed `task.requested` envelope: terminally journaled as `EVENT_REJECTED` and acknowledged rather than retried forever;
 - deterministic tool admission failure: reported to the run; host should repair configuration/input rather than blindly expand authority;
 - ambiguous mutation: fail closed into `BLOCKED_EFFECT`;
 - max-step exhaustion: deterministic run failure;
-- expired lease: recoverable queue ownership loss.
+- expired lease: recoverable queue ownership loss; a reclaim rotates the fencing token, and fenced run-progress transactions prevent the stale worker from committing durable progress;
+- dead-letter exhaustion: terminal automatic retry state; an operator may inspect and explicitly redrive one exact event after correcting the underlying condition.
 
 ## Extension seams
 
