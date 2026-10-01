@@ -472,3 +472,36 @@ def test_cancel_after_confirmed_effect_records_result_without_redispatch(
     assert attempts == 1
     transcript = store.list_run_messages(run_id)
     assert any("written" in message["content"] for message in transcript)
+
+
+def test_cancel_paused_run_applies_immediately_without_worker_cycle(tmp_path: Path) -> None:
+    state = tmp_path / "state.db"
+    store = Store(state)
+    tools = ToolRegistry(store)
+
+    class NeverModel:
+        def respond(self, *, messages, tools):
+            raise AssertionError("paused run must not call model")
+
+    engine = Engine(
+        store=store,
+        model=NeverModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+    )
+    run_id = engine.submit_task("pause then cancel", set(), now=1.0)
+    store.request_run_control(run_id, action="PAUSE", reason="hold", now=2.0)
+    assert engine.run_once(now=3.0) == run_id
+    assert store.get_run(run_id)["status"] == "PAUSED"
+
+    store.request_run_control(run_id, action="CANCEL", reason="stop permanently", now=4.0)
+
+    run = store.get_run(run_id)
+    assert run["status"] == "CANCELLED"
+    assert run["control_action"] is None
+    assert run["cancelled_at"] == 4.0
+    [event] = store.list_events(kind="run.step")
+    assert event["status"] == "CANCELLED"
+    assert store.pending_event_count() == 0
