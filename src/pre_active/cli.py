@@ -52,6 +52,7 @@ def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
         lease_seconds=args.lease_seconds,
         lease_heartbeat_seconds=args.lease_heartbeat_seconds,
         max_lease_extension_seconds=args.max_lease_extension_seconds,
+        max_event_attempts=args.max_event_attempts,
         max_steps=args.max_steps,
     )
     return Daemon(scheduler=Scheduler(store), engine=engine)
@@ -91,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
         run.add_argument("--lease-seconds", type=float, default=30.0)
         run.add_argument("--lease-heartbeat-seconds", type=float)
         run.add_argument("--max-lease-extension-seconds", type=float, default=900.0)
+        run.add_argument("--max-event-attempts", type=int, default=16)
         run.add_argument("--max-steps", type=int, default=24)
         if name == "daemon":
             run.add_argument("--poll-seconds", type=float, default=1.0)
