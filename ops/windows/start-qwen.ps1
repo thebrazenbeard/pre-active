@@ -1,23 +1,23 @@
 $ErrorActionPreference = "Stop"
 
-$root = if ($env:PRO_RUN_ROOT) { $env:PRO_RUN_ROOT } else { "C:\ProgramData\ProRun" }
+$root = if ($env:PRE_ACTIVE_ROOT) { $env:PRE_ACTIVE_ROOT } else { "C:\ProgramData\PreActive" }
 $python = Join-Path $root "python\python.exe"
 $script = Join-Path $root "runtime\qwen_http.py"
 $modelPathFile = Join-Path $root "runtime\model-path.txt"
 $supervisorLog = Join-Path $root "logs\qwen-supervisor.log"
 $nvidiaSmi = "C:\Windows\System32\nvidia-smi.exe"
-$minimumFreeMiB = if ($env:PRO_RUN_MIN_FREE_VRAM_MIB) { [int]$env:PRO_RUN_MIN_FREE_VRAM_MIB } else { 3400 }
-$port = if ($env:PRO_RUN_MODEL_PORT) { [int]$env:PRO_RUN_MODEL_PORT } else { 18081 }
+$minimumFreeMiB = if ($env:PRE_ACTIVE_MIN_FREE_VRAM_MIB) { [int]$env:PRE_ACTIVE_MIN_FREE_VRAM_MIB } else { 3400 }
+$port = if ($env:PRE_ACTIVE_MODEL_PORT) { [int]$env:PRE_ACTIVE_MODEL_PORT } else { 18081 }
 
 if (-not (Test-Path $python)) { throw "Pinned Python missing: $python" }
 if (-not (Test-Path $script)) { throw "Qwen server script missing: $script" }
 if (-not (Test-Path $nvidiaSmi)) { throw "nvidia-smi missing: $nvidiaSmi" }
 
-if (-not $env:PRO_RUN_MODEL_PATH) {
+if (-not $env:PRE_ACTIVE_MODEL_PATH) {
     if (-not (Test-Path $modelPathFile)) { throw "Model path binding missing: $modelPathFile" }
-    $env:PRO_RUN_MODEL_PATH = (Get-Content $modelPathFile -Raw).Trim()
+    $env:PRE_ACTIVE_MODEL_PATH = (Get-Content $modelPathFile -Raw).Trim()
 }
-if (-not (Test-Path $env:PRO_RUN_MODEL_PATH)) { throw "Bound model path does not exist: $($env:PRO_RUN_MODEL_PATH)" }
+if (-not (Test-Path $env:PRE_ACTIVE_MODEL_PATH)) { throw "Bound model path does not exist: $($env:PRE_ACTIVE_MODEL_PATH)" }
 
 $env:PYTHONPATH = Join-Path $root "model-env\Lib\site-packages"
 

@@ -5,11 +5,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from prorun.context import ContextAssembler
-from prorun.engine import Engine
-from prorun.providers.openai_compatible import OpenAICompatibleAdapter
-from prorun.store import Store
-from prorun.tools import ToolRegistry, ToolSpec
+from pre_active.context import ContextAssembler
+from pre_active.engine import Engine
+from pre_active.providers.openai_compatible import OpenAICompatibleAdapter
+from pre_active.store import Store
+from pre_active.tools import ToolRegistry, ToolSpec
 
 
 class ToolLoopHandler(BaseHTTPRequestHandler):

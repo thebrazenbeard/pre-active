@@ -1,12 +1,12 @@
 > **License:** Source-visible, not open source. Original material is proprietary. Commercial use, redistribution, hosted-service use, and commercial derivative products require written permission. See [LICENSE](LICENSE) and [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md). Separately identified third-party components retain their own licenses.
 
-# Pro-Run
+# Pre-Active
 
 **Durable continuous execution for tool-using language models.**
 
-Pro-Run turns a stateless model call into a recoverable execution process: events wake work, durable state survives process restarts, relevant memory is injected into context, model turns are constrained to structured tool calls or a final answer, and external mutations are fenced behind idempotency and reconciliation rules.
+Pre-Active turns a stateless model call into a recoverable execution process: events wake work, durable state survives process restarts, relevant memory is injected into context, model turns are constrained to structured tool calls or a final answer, and external mutations are fenced behind idempotency and reconciliation rules.
 
-The repository description calls this a continuous execution environment for LLM autonomy. In concrete terms, Pro-Run provides **process-level autonomy while a Pro-Run daemon is actually running**. It does not imply hidden activity when no process is running, model consciousness, unrestricted authority, or permission to perform effects a host has not granted.
+The repository description calls this a continuous execution environment for LLM autonomy. In concrete terms, Pre-Active provides **process-level autonomy while a Pre-Active daemon is actually running**. It does not imply hidden activity when no process is running, model consciousness, unrestricted authority, or permission to perform effects a host has not granted.
 
 ## What V1 provides
 
@@ -38,7 +38,7 @@ Reasoning is retryable. External effects are not assumed retryable.
 REQUEST != AUTHORITY != ATTEMPT != EFFECT != VERIFIED EFFECT
 ```
 
-If a mutation handler loses its response after dispatch, Pro-Run records `ATTEMPTED_UNKNOWN`, stops that run, and refuses blind replay. A host must reconcile whether the effect occurred. If it did, the committed result is replayed; if it did not, Pro-Run retries the exact stored request rather than asking the model to invent a replacement call.
+If a mutation handler loses its response after dispatch, Pre-Active records `ATTEMPTED_UNKNOWN`, stops that run, and refuses blind replay. A host must reconcile whether the effect occurred. If it did, the committed result is replayed; if it did not, Pre-Active retries the exact stored request rather than asking the model to invent a replacement call.
 
 ## Architecture
 
@@ -82,7 +82,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/EFFECT_AND_RECOVERY.m
 
 ## Portfolio-derived design
 
-Before implementation, the then-accessible `thebrazenbeard` portfolio was swept at repository level: **70 repositories** were inventoried and their README surfaces inspected at that historical cut. The live portfolio has since grown; the 70-repository figure is provenance for the V1 donor sweep, not a current census. High-value public donors were then inspected more deeply. Pro-Run is self-contained; donor repositories are architecture/provenance inputs, not runtime dependencies.
+Before implementation, the then-accessible `thebrazenbeard` portfolio was swept at repository level: **70 repositories** were inventoried and their README surfaces inspected at that historical cut. The live portfolio has since grown; the 70-repository figure is provenance for the V1 donor sweep, not a current census. High-value public donors were then inspected more deeply. Pre-Active is self-contained; donor repositories are architecture/provenance inputs, not runtime dependencies.
 
 The strongest donor mechanisms were:
 
@@ -110,7 +110,7 @@ pytest
 Submit a durable task:
 
 ```bash
-pro-run --state .pro-run/state.db submit \
+pre-active --state .pre-active/state.db submit \
   "Summarize the queued work" \
   --capability files.read
 ```
@@ -118,23 +118,23 @@ pro-run --state .pro-run/state.db submit \
 Run one cycle against an OpenAI-compatible chat-completions endpoint:
 
 ```bash
-export PRO_RUN_BASE_URL="http://localhost:11434/v1"
-export PRO_RUN_MODEL="your-model"
-# export PRO_RUN_API_KEY="..."  # only when your endpoint requires one
+export PRE_ACTIVE_BASE_URL="http://localhost:11434/v1"
+export PRE_ACTIVE_MODEL="your-model"
+# export PRE_ACTIVE_API_KEY="..."  # only when your endpoint requires one
 
-pro-run --state .pro-run/state.db run-once
+pre-active --state .pre-active/state.db run-once
 ```
 
 Run continuously:
 
 ```bash
-pro-run --state .pro-run/state.db daemon --poll-seconds 1
+pre-active --state .pre-active/state.db daemon --poll-seconds 1
 ```
 
 Schedule a recurring task:
 
 ```bash
-pro-run --state .pro-run/state.db schedule \
+pre-active --state .pre-active/state.db schedule \
   "Review the durable queue" \
   --every 300
 ```
@@ -144,10 +144,10 @@ The CLI intentionally does not expose arbitrary shell execution. Host applicatio
 ## Library sketch
 
 ```python
-from prorun.context import ContextAssembler
-from prorun.engine import Engine
-from prorun.store import Store
-from prorun.tools import ToolRegistry, ToolSpec
+from pre_active.context import ContextAssembler
+from pre_active.engine import Engine
+from pre_active.store import Store
+from pre_active.tools import ToolRegistry, ToolSpec
 
 store = Store("state.db")
 tools = ToolRegistry(store)
@@ -166,12 +166,12 @@ tools.register(
 # Supply any object implementing ModelAdapter, then create Engine(...).
 ```
 
-Mutating handlers should return JSON-serializable dictionaries. If a mutation throws after ledger admission, Pro-Run treats its outcome as ambiguous rather than assuming nothing happened.
+Mutating handlers should return JSON-serializable dictionaries. If a mutation throws after ledger admission, Pre-Active treats its outcome as ambiguous rather than assuming nothing happened.
 
 ## Repository map
 
 ```text
-src/prorun/
+src/pre_active/
   cli.py                     CLI entrypoint
   context.py                 bounded context + memory assembly
   daemon.py                  scheduler/engine continuous loop

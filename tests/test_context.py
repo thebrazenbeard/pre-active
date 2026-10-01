@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from prorun.context import ContextAssembler
-from prorun.store import Store
+from pre_active.context import ContextAssembler
+from pre_active.store import Store
 
 
 def test_context_is_bounded_and_keeps_task_before_old_memory(tmp_path: Path) -> None:
@@ -11,7 +11,7 @@ def test_context_is_bounded_and_keeps_task_before_old_memory(tmp_path: Path) -> 
 
     assembler = ContextAssembler(store, max_chars=240)
     messages = assembler.build(
-        system_prompt="You are Pro-Run.",
+        system_prompt="You are Pre-Active.",
         task="Do the exact current task safely.",
         query="critical",
     )

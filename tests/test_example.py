@@ -1,7 +1,7 @@
 from pathlib import Path
 import runpy
 
-from prorun.store import Store
+from pre_active.store import Store
 
 
 def test_minimal_example_closes_store(monkeypatch) -> None:

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from prorun.store import Store
+from pre_active.store import Store
 
 
 def test_event_claim_is_exclusive_and_recovers_expired_lease(tmp_path: Path) -> None:

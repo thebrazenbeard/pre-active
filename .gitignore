@@ -6,7 +6,7 @@ venv/
 dist/
 build/
 *.egg-info/
-.pro-run/
+.pre-active/
 *.db
 *.db-shm
 *.db-wal
