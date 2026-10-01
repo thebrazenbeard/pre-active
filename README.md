@@ -34,6 +34,7 @@ The repository description calls this a continuous execution environment for LLM
 - Atomic run-generation advance + successor-event scheduling, including effect-recovery resumes.
 - Append-only lifecycle journal entries for queue claims and recovery evidence.
 - A small daemon and CLI for submitting, scheduling, inspecting, and running work.
+- A provider-neutral operational snapshot covering backlog shape, claim expiry, retry/dead-letter pressure, run states, and due schedules without inventing a universal health verdict.
 - Daemon polling survives ordinary cycle exceptions after durable retry/rejection handling; process-control exceptions still stop it.
 - Malformed task-request envelopes are terminally rejected and journaled instead of becoming poison retry loops.
 
@@ -154,12 +155,15 @@ pre-active --state .pre-active/state.db schedule \
   --every 300
 ```
 
-Inspect and explicitly redrive exhausted work:
+Inspect runtime state and exhausted work:
 
 ```bash
+pre-active --state .pre-active/state.db status
 pre-active --state .pre-active/state.db dead
 pre-active --state .pre-active/state.db redrive <event-id>
 ```
+
+`status` keeps the existing `pending_events`, `dead_events`, and `runs` fields and adds ready/delayed/retry backlog counts, active/expired claims, oldest-wait ages, and enabled/due schedule counts. These are measurements, not a liveness or SLA verdict.
 
 Redrive is intentionally one event at a time. It resets that event's attempt count and preserves its identity/dedup binding. A dead `run.step` may resume its run only when the event is recorded as the exact cause of that exact failed run generation.
 
