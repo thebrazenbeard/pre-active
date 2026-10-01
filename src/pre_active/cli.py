@@ -80,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="show durable queue/run status")
 
+    dead = sub.add_parser("dead", help="list dead-lettered events")
+    dead.add_argument("--limit", type=int, default=100)
+
+    redrive = sub.add_parser("redrive", help="redrive one exact dead-lettered event")
+    redrive.add_argument("event_id")
+
     for name in ("run-once", "daemon"):
         run = sub.add_parser(name, help="execute the continuous runtime")
         run.add_argument("--base-url")
@@ -140,6 +146,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "dead_events": store.dead_event_count(),
                         "runs": {str(row["status"]): int(row["n"]) for row in rows},
                     },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "dead":
+            print(
+                json.dumps(
+                    {"events": store.list_dead_events(limit=args.limit)},
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "redrive":
+            store.redrive_event(args.event_id, now=now)
+            print(
+                json.dumps(
+                    {"event_id": args.event_id, "status": "PENDING"},
                     sort_keys=True,
                 )
             )
