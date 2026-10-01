@@ -228,3 +228,15 @@ def test_provider_protocol_failure_is_non_retryable(monkeypatch) -> None:
 
     with pytest.raises(NonRetryableModelError, match="provider response"):
         adapter.respond(messages=[{"role": "user", "content": "hi"}], tools=[])
+
+
+def test_retry_after_parser_supports_seconds_http_date_and_invalid_values() -> None:
+    from pre_active.providers.openai_compatible import _parse_retry_after
+
+    assert _parse_retry_after("120", now=0.0) == 120.0
+    assert _parse_retry_after(
+        "Fri, 31 Dec 1999 23:59:59 GMT",
+        now=946684739.0,
+    ) == 60.0
+    assert _parse_retry_after("not-a-date", now=0.0) is None
+    assert _parse_retry_after(None, now=0.0) is None
