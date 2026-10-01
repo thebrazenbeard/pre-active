@@ -421,6 +421,227 @@ class Store:
             self.connection.execute("ROLLBACK")
             raise
 
+    def apply_claimed_run_control(
+        self,
+        *,
+        run_id: str,
+        event_id: str,
+        worker_id: str,
+        lease_token: str,
+        now: float,
+        advance_step: bool = False,
+    ) -> str | None:
+        row = self.connection.execute(
+            """
+            SELECT status, step_count, control_action, control_reason
+            FROM runs WHERE id=?
+            """,
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        if str(row["status"]) != "RUNNING":
+            return None
+        action = row["control_action"]
+        if action not in {"PAUSE", "CANCEL"}:
+            return None
+        reason = row["control_reason"]
+
+        self._require_active_claim(
+            event_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            now=now,
+        )
+
+        if action == "PAUSE":
+            if advance_step:
+                cursor = self.connection.execute(
+                    """
+                    UPDATE runs
+                    SET status='PAUSED', step_count=step_count+1,
+                        control_action=NULL, paused_event_id=NULL, paused_at=?,
+                        last_error=NULL, updated_at=?
+                    WHERE id=? AND status='RUNNING'
+                    """,
+                    (now, now, run_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("run pause lost RUNNING state")
+                self.ack_event(
+                    event_id,
+                    worker_id=worker_id,
+                    lease_token=lease_token,
+                    now=now,
+                )
+            else:
+                event_cursor = self.connection.execute(
+                    """
+                    UPDATE events
+                    SET status='PAUSED', lease_owner=NULL, lease_until=NULL,
+                        lease_token=NULL, updated_at=?
+                    WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+                      AND lease_until IS NOT NULL AND lease_until > ?
+                    """,
+                    (now, event_id, worker_id, lease_token, now),
+                )
+                if event_cursor.rowcount != 1:
+                    raise EventLeaseLost("event pause lost lease ownership")
+                cursor = self.connection.execute(
+                    """
+                    UPDATE runs
+                    SET status='PAUSED', control_action=NULL, paused_event_id=?,
+                        paused_at=?, updated_at=?
+                    WHERE id=? AND status='RUNNING'
+                    """,
+                    (event_id, now, now, run_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("run pause lost RUNNING state")
+                self.append_journal(
+                    event_type="EVENT_PAUSED",
+                    subject_id=event_id,
+                    payload={"run_id": run_id},
+                    now=now,
+                )
+            self.append_journal(
+                event_type="RUN_PAUSED",
+                subject_id=run_id,
+                payload={
+                    "event_id": event_id,
+                    "reason": reason,
+                    "advanced_step": bool(advance_step),
+                },
+                now=now,
+            )
+            return "PAUSE"
+
+        sets = [
+            "status='CANCELLED'",
+            "control_action=NULL",
+            "paused_event_id=NULL",
+            "cancelled_at=?",
+            "updated_at=?",
+        ]
+        params: list[Any] = [now, now]
+        if advance_step:
+            sets.append("step_count=step_count+1")
+            sets.append("last_error=NULL")
+        params.append(run_id)
+        run_cursor = self.connection.execute(
+            f"UPDATE runs SET {', '.join(sets)} WHERE id=? AND status='RUNNING'",
+            params,
+        )
+        if run_cursor.rowcount != 1:
+            raise RuntimeError("run cancellation lost RUNNING state")
+        event_cursor = self.connection.execute(
+            """
+            UPDATE events
+            SET status='CANCELLED', lease_owner=NULL, lease_until=NULL,
+                lease_token=NULL, updated_at=?
+            WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+              AND lease_until IS NOT NULL AND lease_until > ?
+            """,
+            (now, event_id, worker_id, lease_token, now),
+        )
+        if event_cursor.rowcount != 1:
+            raise EventLeaseLost("event cancellation lost lease ownership")
+        self.append_journal(
+            event_type="EVENT_CANCELLED",
+            subject_id=event_id,
+            payload={"run_id": run_id},
+            now=now,
+        )
+        self.append_journal(
+            event_type="RUN_CANCELLED",
+            subject_id=run_id,
+            payload={
+                "event_id": event_id,
+                "reason": reason,
+                "advanced_step": bool(advance_step),
+            },
+            now=now,
+        )
+        return "CANCEL"
+
+    def resume_paused_run(
+        self,
+        run_id: str,
+        *,
+        reason: str | None,
+        now: float,
+        priority: int = 0,
+    ) -> None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT status, step_count, paused_event_id
+                FROM runs WHERE id=?
+                """,
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            if str(row["status"]) != "PAUSED":
+                raise RuntimeError("run is not PAUSED")
+
+            paused_event_id = row["paused_event_id"]
+            step = int(row["step_count"])
+            if paused_event_id is not None:
+                event = self.connection.execute(
+                    "SELECT kind, payload_json, status FROM events WHERE id=?",
+                    (paused_event_id,),
+                ).fetchone()
+                if event is None or str(event["status"]) != "PAUSED":
+                    raise RuntimeError("paused run lost its paused event")
+                payload = json.loads(event["payload_json"])
+                if (
+                    str(event["kind"]) != "run.step"
+                    or payload.get("run_id") != run_id
+                    or payload.get("step") != step
+                ):
+                    raise RuntimeError("paused event does not match run generation")
+                event_cursor = self.connection.execute(
+                    """
+                    UPDATE events
+                    SET status='PENDING', available_at=?, updated_at=?
+                    WHERE id=? AND status='PAUSED'
+                    """,
+                    (now, now, paused_event_id),
+                )
+                if event_cursor.rowcount != 1:
+                    raise RuntimeError("paused event resume lost PAUSED state")
+            else:
+                self.enqueue_event(
+                    kind="run.step",
+                    payload={"run_id": run_id, "step": step},
+                    priority=priority,
+                    dedup_key=f"run-step:{run_id}:{step}",
+                    now=now,
+                )
+
+            cursor = self.connection.execute(
+                """
+                UPDATE runs
+                SET status='RUNNING', paused_event_id=NULL, updated_at=?
+                WHERE id=? AND status='PAUSED'
+                """,
+                (now, run_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("run resume lost PAUSED state")
+            self.append_journal(
+                event_type="RUN_RESUMED",
+                subject_id=run_id,
+                payload={"reason": reason, "step": step},
+                now=now,
+            )
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+
     def _require_active_claim(
         self,
         event_id: str,
