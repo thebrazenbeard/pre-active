@@ -124,11 +124,51 @@ class Engine:
             query=run["task"],
         )
 
+    def _apply_pending_control(
+        self,
+        *,
+        event: Event,
+        run_id: str,
+        heartbeat: LeaseHeartbeat,
+        advance_step: bool = False,
+    ) -> str | None:
+        with self.store.active_claim_transaction(
+            event.id,
+            worker_id=self.worker_id,
+            lease_token=event.lease_token or "",
+            now=heartbeat.current_time,
+            validate=heartbeat.assert_owned,
+        ) as transition_now:
+            return self.store.apply_claimed_run_control(
+                run_id=run_id,
+                event_id=event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token or "",
+                now=transition_now,
+                advance_step=advance_step,
+            )
+
     def resume_blocked_effect(self, run_id: str, *, now: float) -> None:
         run = self.store.get_run(run_id)
         if run["status"] != "BLOCKED_EFFECT" or not run["blocked_request_id"]:
             raise RuntimeError("run is not blocked on an unresolved effect")
-        request_id = str(run["blocked_request_id"] )
+        request_id = str(run["blocked_request_id"])
+        effect_state = self.tools.effect_state(request_id)
+        control_action = run["control_action"]
+
+        # A reconciled no-effect mutation must not be retried merely to satisfy
+        # recovery when the operator has already asked to pause or cancel.
+        if (
+            control_action in {"PAUSE", "CANCEL"}
+            and effect_state == "RECONCILED_NO_EFFECT"
+        ):
+            self.store.apply_blocked_run_control_after_reconciliation(
+                run_id,
+                now=now,
+                effect_completed=False,
+            )
+            return
+
         result = self.tools.recover_reconciled(
             request_id=request_id,
             allowed_capabilities=run["capabilities"],
@@ -141,6 +181,19 @@ class Engine:
             now=now,
             message_key=f"effect:{request_id}:reconciled-result",
         )
+
+        # Control may have arrived while an exact no-effect retry was already
+        # executing. At that point the operation is allowed to finish and its
+        # result is recorded before control is applied.
+        refreshed = self.store.get_run(run_id)
+        if refreshed["control_action"] in {"PAUSE", "CANCEL"}:
+            self.store.apply_blocked_run_control_after_reconciliation(
+                run_id,
+                now=now,
+                effect_completed=True,
+            )
+            return
+
         self.store.resume_run_after_effect(run_id=run_id, now=now, priority=0)
 
     def run_once(self, *, now: float) -> str | None:
@@ -247,6 +300,12 @@ class Engine:
                 now=heartbeat.current_time(),
             )
             return run_id
+        if self._apply_pending_control(
+            event=event,
+            run_id=run_id,
+            heartbeat=heartbeat,
+        ) is not None:
+            return run_id
         if run["step_count"] >= self.max_steps:
             with self.store.active_claim_transaction(
                 event.id,
@@ -279,6 +338,12 @@ class Engine:
                     tools=self.tools.specs(run["capabilities"]),
                 )
                 heartbeat.assert_owned()
+                if self._apply_pending_control(
+                    event=event,
+                    run_id=run_id,
+                    heartbeat=heartbeat,
+                ) is not None:
+                    return run_id
                 with self.store.active_claim_transaction(
                     event.id,
                     worker_id=self.worker_id,
@@ -295,6 +360,12 @@ class Engine:
             else:
                 response = _response_from_decision(stored_decision)
             heartbeat.assert_owned()
+            if self._apply_pending_control(
+                event=event,
+                run_id=run_id,
+                heartbeat=heartbeat,
+            ) is not None:
+                return run_id
             if response.tool_call is not None:
                 call = response.tool_call
                 with self.store.active_claim_transaction(
@@ -382,18 +453,27 @@ class Engine:
                         now=transition_now,
                         message_key=f"step:{run['step_count']}:tool-result",
                     )
-                    self.store.advance_run_step(
+                    applied = self.store.apply_claimed_run_control(
                         run_id=run_id,
-                        expected_step=run["step_count"],
-                        priority=event.priority,
-                        now=transition_now,
-                    )
-                    self.store.ack_event(
-                        event.id,
+                        event_id=event.id,
                         worker_id=self.worker_id,
                         lease_token=event.lease_token,
                         now=transition_now,
+                        advance_step=True,
                     )
+                    if applied is None:
+                        self.store.advance_run_step(
+                            run_id=run_id,
+                            expected_step=run["step_count"],
+                            priority=event.priority,
+                            now=transition_now,
+                        )
+                        self.store.ack_event(
+                            event.id,
+                            worker_id=self.worker_id,
+                            lease_token=event.lease_token,
+                            now=transition_now,
+                        )
                 return run_id
             else:
                 assert response.final_text is not None
@@ -404,25 +484,33 @@ class Engine:
                     now=heartbeat.current_time,
                     validate=heartbeat.assert_owned,
                 ) as transition_now:
-                    self.store.record_run_message(
+                    applied = self.store.apply_claimed_run_control(
                         run_id=run_id,
-                        role="assistant",
-                        content=response.final_text,
-                        now=transition_now,
-                        message_key=f"step:{run['step_count']}:assistant-final",
-                    )
-                    self.store.complete_run_step(
-                        run_id=run_id,
-                        expected_step=run["step_count"],
-                        final_text=response.final_text,
-                        now=transition_now,
-                    )
-                    self.store.ack_event(
-                        event.id,
+                        event_id=event.id,
                         worker_id=self.worker_id,
                         lease_token=event.lease_token,
                         now=transition_now,
                     )
+                    if applied is None:
+                        self.store.record_run_message(
+                            run_id=run_id,
+                            role="assistant",
+                            content=response.final_text,
+                            now=transition_now,
+                            message_key=f"step:{run['step_count']}:assistant-final",
+                        )
+                        self.store.complete_run_step(
+                            run_id=run_id,
+                            expected_step=run["step_count"],
+                            final_text=response.final_text,
+                            now=transition_now,
+                        )
+                        self.store.ack_event(
+                            event.id,
+                            worker_id=self.worker_id,
+                            lease_token=event.lease_token,
+                            now=transition_now,
+                        )
                 return run_id
         except EventLeaseLost as exc:
             raise LeaseLost(str(exc)) from exc

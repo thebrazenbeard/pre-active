@@ -147,3 +147,26 @@ Redrive resets the event attempt count and retry evidence fields while preservin
 For `run.step` events, Pre-Active also records the exact dead-letter event ID on the failed run. A redrive may move that run back to `RUNNING` only when all of these still match: the run is `FAILED`, its `failed_event_id` is the redriven event, and the event's step equals the run's current generation. This prevents a generic dead event from resurrecting an unrelated or subsequently changed run.
 
 Redrive does not bypass `BLOCKED_EFFECT`. Ambiguous mutations still require reconciliation evidence before any retry.
+
+
+## Cooperative run control
+
+Pause and cancel are durable orchestration controls, not external-effect controls:
+
+```text
+CANCEL_REQUESTED != EXTERNAL_EFFECT_CANCELLED
+PAUSE_REQUESTED != WORKER_PROCESS_STOPPED
+CONTROL_ACCEPTED != CONTROL_APPLIED
+```
+
+For a `RUNNING` run, the engine applies pending PAUSE/CANCEL at fenced safe boundaries. Before tool dispatch, control prevents a new tool call from starting. If a tool handler is already executing, Pre-Active does not kill the process; the operation is allowed to return or enter the existing ambiguity path, and control applies after its result is durably classified.
+
+`BLOCKED_EFFECT` has precedence over control. A PAUSE/CANCEL request may be recorded while the run is blocked, but it cannot erase `ATTEMPTED_UNKNOWN` or make the run terminal before reconciliation.
+
+After reconciliation:
+
+- confirmed effect: the reconciled result is durably recorded, the run generation advances once, and pending PAUSE/CANCEL is then applied;
+- confirmed no effect + CANCEL: the exact mutation is not retried; the run becomes `CANCELLED`;
+- confirmed no effect + PAUSE: the exact mutation is not retried; the run becomes `PAUSED`; a later resume reuses the already-admitted model decision and exact persisted request identity.
+
+This preserves the effect contract while giving operators durable control over future orchestration progress.
