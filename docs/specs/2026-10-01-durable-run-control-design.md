@@ -57,6 +57,7 @@ No control request may erase unresolved effect evidence.
 ```text
 RUNNING --pause request--> RUNNING(control=PAUSE) --safe boundary--> PAUSED
 RUNNING --cancel request-> RUNNING(control=CANCEL) --safe boundary--> CANCELLED
+RUNNING(control=PAUSE) --resume--> RUNNING(control=NONE)
 PAUSED  --resume---------> RUNNING
 PAUSED  --cancel---------> CANCELLED
 
@@ -64,7 +65,7 @@ BLOCKED_EFFECT --pause/cancel request--> BLOCKED_EFFECT(control=...)
 BLOCKED_EFFECT --reconcile--> PAUSED/CANCELLED or ordinary recovery
 ```
 
-Terminal states `COMPLETED`, `FAILED`, and `CANCELLED` reject new pause/resume/cancel requests except idempotent reads.
+Terminal states `COMPLETED`, `FAILED`, and `CANCELLED` reject new pause/resume/cancel requests except idempotent reads. Resume may withdraw a pending PAUSE before it is applied, but it may not withdraw pending CANCEL intent.
 
 ## Event handling
 
