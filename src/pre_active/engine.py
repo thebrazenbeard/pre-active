@@ -142,6 +142,8 @@ class Engine:
         )
         if event is None:
             return None
+        if not event.lease_token:
+            raise RuntimeError("claimed event missing lease token")
         if event.kind == "task.requested":
             task = event.payload.get("task")
             capabilities = event.payload.get("capabilities", [])
@@ -152,7 +154,7 @@ class Engine:
                     payload={"reason": "task.requested task must be a non-empty string"},
                     now=now,
                 )
-                self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+                self.store.ack_event(event.id, worker_id=self.worker_id, lease_token=event.lease_token, now=now)
                 return None
             if not isinstance(capabilities, list) or not all(
                 isinstance(item, str) for item in capabilities
@@ -163,7 +165,7 @@ class Engine:
                     payload={"reason": "task.requested capabilities must be a list of strings"},
                     now=now,
                 )
-                self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+                self.store.ack_event(event.id, worker_id=self.worker_id, lease_token=event.lease_token, now=now)
                 return None
             run_id = self.submit_task(
                 task.strip(),
@@ -171,20 +173,20 @@ class Engine:
                 now=now,
                 source_event_id=event.id,
             )
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(event.id, worker_id=self.worker_id, lease_token=event.lease_token, now=now)
             return run_id
         if event.kind != "run.step":
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(event.id, worker_id=self.worker_id, lease_token=event.lease_token, now=now)
             return None
 
         run_id = str(event.payload["run_id"])
         run = self.store.get_run(run_id)
         event_step = event.payload.get("step")
         if not isinstance(event_step, int) or event_step != run["step_count"]:
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(event.id, worker_id=self.worker_id, lease_token=event.lease_token, now=now)
             return run_id
         if run["status"] != "RUNNING":
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(event.id, worker_id=self.worker_id, lease_token=event.lease_token, now=now)
             return run_id
         if run["step_count"] >= self.max_steps:
             self.store.update_run(
@@ -193,7 +195,7 @@ class Engine:
                 status="FAILED",
                 last_error="max_steps exceeded",
             )
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(event.id, worker_id=self.worker_id, lease_token=event.lease_token, now=now)
             return run_id
 
         try:
@@ -243,7 +245,7 @@ class Engine:
                             now=now,
                         )
                         self.store.ack_event(
-                            event.id, worker_id=self.worker_id, now=now
+                            event.id, worker_id=self.worker_id, lease_token=event.lease_token, now=now
                         )
                         return run_id
                     if isinstance(exc, ToolError):
@@ -254,7 +256,7 @@ class Engine:
                             last_error=f"{type(exc).__name__}: {exc}",
                         )
                         self.store.ack_event(
-                            event.id, worker_id=self.worker_id, now=now
+                            event.id, worker_id=self.worker_id, lease_token=event.lease_token, now=now
                         )
                         return run_id
                     raise
@@ -288,13 +290,14 @@ class Engine:
                     clear_last_error=True,
                     increment_step=True,
                 )
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(event.id, worker_id=self.worker_id, lease_token=event.lease_token, now=now)
             return run_id
         except BaseException as exc:
             self.store.update_run(run_id, now=now, last_error=f"{type(exc).__name__}: {exc}")
             self.store.fail_event(
                 event.id,
                 worker_id=self.worker_id,
+                lease_token=event.lease_token,
                 now=now,
                 retry_at=now + min(60.0, 2.0 ** min(event.attempts, 6)),
             )
