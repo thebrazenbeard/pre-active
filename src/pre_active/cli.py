@@ -137,6 +137,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 json.dumps(
                     {
                         "pending_events": store.pending_event_count(),
+                        "dead_events": store.dead_event_count(),
                         "runs": {str(row["status"]): int(row["n"]) for row in rows},
                     },
                     sort_keys=True,
