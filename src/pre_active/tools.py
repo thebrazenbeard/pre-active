@@ -312,6 +312,7 @@ class ToolRegistry:
         request_id: str,
         allowed_capabilities: set[str],
         now: float,
+        before_dispatch: Callable[[], None] | None = None,
     ) -> ToolExecution:
         if name not in self._specs:
             raise ToolError(f"unknown tool: {name}")
@@ -319,6 +320,8 @@ class ToolRegistry:
         if spec.capability not in allowed_capabilities:
             raise CapabilityDenied(f"capability not granted: {spec.capability}")
         self._validate_arguments(spec, arguments)
+        if before_dispatch is not None:
+            before_dispatch()
         request_payload = _canonical_json({"tool": name, "arguments": arguments})
         request_digest = _sha256(request_payload)
 
