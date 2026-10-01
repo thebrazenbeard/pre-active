@@ -135,3 +135,52 @@ def test_reclaimed_event_rotates_fencing_token_and_rejects_stale_claim(tmp_path:
         lease_token=recovered.lease_token,
         now=11.0,
     )
+
+
+def test_event_failure_dead_letters_at_attempt_ceiling(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    event_id = store.enqueue_event(
+        kind="probe",
+        payload={"value": 7},
+        dedup_key="dead-letter-probe",
+        now=1.0,
+    )
+
+    first = store.claim_event(worker_id="worker-a", now=2.0, lease_seconds=10.0)
+    assert first is not None and first.lease_token
+    assert store.fail_event(
+        first.id,
+        worker_id="worker-a",
+        lease_token=first.lease_token,
+        now=3.0,
+        retry_at=4.0,
+        max_attempts=2,
+        error="first failure",
+    ) is False
+
+    retried = store.claim_event(worker_id="worker-b", now=5.0, lease_seconds=10.0)
+    assert retried is not None and retried.lease_token
+    assert retried.attempts == 2
+    assert store.fail_event(
+        retried.id,
+        worker_id="worker-b",
+        lease_token=retried.lease_token,
+        now=6.0,
+        retry_at=7.0,
+        max_attempts=2,
+        error="second failure",
+    ) is True
+
+    [row] = store.list_events(kind="probe")
+    assert row["id"] == event_id
+    assert row["status"] == "DEAD"
+    assert row["attempts"] == 2
+    assert row["last_error"] == "second failure"
+    assert row["dead_lettered_at"] == 6.0
+    assert store.pending_event_count() == 0
+
+    journal_types = [
+        entry["event_type"] for entry in store.list_journal(subject_id=event_id)
+    ]
+    assert "EVENT_RETRY_SCHEDULED" in journal_types
+    assert journal_types[-1] == "EVENT_DEAD_LETTERED"
