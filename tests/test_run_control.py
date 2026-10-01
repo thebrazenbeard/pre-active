@@ -598,3 +598,55 @@ def test_cancel_after_tool_decision_persistence_still_prevents_handler_dispatch(
     assert not operator_thread.is_alive()
     assert handler_calls == []
     assert store.get_run(run_id)["status"] == "CANCELLED"
+
+
+def test_resume_withdraws_pending_pause_before_worker_applies_it(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    run_id = store.create_run_with_initial_step(
+        task="change mind before pause",
+        capabilities=set(),
+        now=1.0,
+    )
+    store.request_run_control(
+        run_id,
+        action="PAUSE",
+        reason="hold",
+        now=2.0,
+    )
+    assert store.get_run(run_id)["status"] == "RUNNING"
+    assert store.get_run(run_id)["control_action"] == "PAUSE"
+
+    store.resume_paused_run(
+        run_id,
+        reason="never mind",
+        now=2.5,
+    )
+
+    run = store.get_run(run_id)
+    assert run["status"] == "RUNNING"
+    assert run["control_action"] is None
+    assert run["control_reason"] is None
+    assert store.pending_event_count() == 1
+    assert store.list_journal(subject_id=run_id)[-1]["event_type"] == "RUN_RESUMED"
+
+
+def test_resume_cannot_withdraw_pending_cancel(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    run_id = store.create_run_with_initial_step(
+        task="cancel is terminal intent",
+        capabilities=set(),
+        now=1.0,
+    )
+    store.request_run_control(
+        run_id,
+        action="CANCEL",
+        reason="stop",
+        now=2.0,
+    )
+
+    with pytest.raises(RuntimeError, match="CANCEL"):
+        store.resume_paused_run(
+            run_id,
+            reason="changed mind",
+            now=2.5,
+        )
