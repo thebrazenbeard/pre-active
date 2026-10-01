@@ -103,3 +103,24 @@ A tool adapter that mutates an external system should prefer:
 - reconciliation probes that are independent from the original response path.
 
 Do not use the Pre-Active request ledger as a substitute for target-native transactional guarantees when those exist.
+
+
+## Queue ownership is separate from effect authority
+
+Event leases coordinate which worker may advance durable queue/run state. Every claim gets a fresh fencing token, and acknowledgement, retry/dead-letter transition, and renewal require that exact token. A stale worker that loses its lease cannot later acknowledge or reschedule the reclaimed event.
+
+For blocking model/tool work, a bounded heartbeat may extend the queue lease while the exact claim remains active. The heartbeat stops extending after its configured maximum duration. This is a liveness mechanism only:
+
+```text
+QUEUE_LEASE != TOOL_CAPABILITY
+QUEUE_LEASE != EFFECT_AUTHORITY
+QUEUE_LEASE != VERIFIED_EFFECT
+```
+
+Mutation safety continues to come from the effect ledger, stable model-decision binding, and reconciliation barrier described above.
+
+## Retry exhaustion and dead letters
+
+Transient engine failures retry with bounded exponential delay until the configured event-attempt ceiling. At the ceiling, the exact claimed event moves atomically to `DEAD`, clears its lease, records the last error and dead-letter timestamp, and appends `EVENT_DEAD_LETTERED` evidence. An associated `RUNNING` run moves to `FAILED`.
+
+Dead-lettering does not assert that an external mutation failed or did not occur. If a mutation outcome is ambiguous, the existing `BLOCKED_EFFECT` path takes precedence; that state must still be reconciled from external evidence rather than converted into a retry/dead-letter assumption.

@@ -20,7 +20,9 @@ The architecture is intentionally self-contained. Portfolio repositories influen
 - interval schedules;
 - append-only journal entries.
 
-Queue work is claimed under `BEGIN IMMEDIATE`. An expired lease can be reclaimed by another worker. A lease is not ownership forever; it is a bounded execution claim. Event deduplication keys are durably bound to canonical kind + payload + priority; reusing a key for different intent fails closed.
+Queue work is claimed under `BEGIN IMMEDIATE`. Every successful claim receives a fresh opaque fencing token. Acknowledgement, retry/dead-letter transition, and renewal require the exact event ID + worker ID + fencing token, so a stale worker cannot complete a claim after another worker reclaims it. An expired lease can be reclaimed by another worker with a new token. A lease is not ownership forever; it is a bounded execution claim. Event deduplication keys are durably bound to canonical kind + payload + priority; reusing a key for different intent fails closed.
+
+`pre_active.lease.LeaseHeartbeat` renews the exact active claim on a dedicated SQLite connection while model/tool work can block longer than the original lease. Renewal is bounded by `max_lease_extension_seconds`; reaching the ceiling or losing the exact claim makes the heartbeat fail closed. Lease ownership is queue coordination only and does not confer capability or effect authority.
 
 ### Scheduler
 
@@ -48,7 +50,7 @@ RUNNING -> COMPLETED
    +----> BLOCKED_EFFECT -> RUNNING  (only after reconciliation)
 ```
 
-`max_steps` bounds runaway tool/reasoning cycles.
+`max_steps` bounds runaway tool/reasoning cycles. `max_event_attempts` bounds transient retry loops; the default is 16 attempts, deliberately above the historical ten-attempt backend-recovery observation recorded for the Windows runtime.
 
 ### Context assembler
 
@@ -105,14 +107,16 @@ See `docs/EFFECT_AND_RECOVERY.md`.
 ## Event state machine
 
 ```text
-PENDING --claim--> CLAIMED --ack--> DONE
-   ^                  |
-   |                  +--failure--> PENDING at retry_at
-   |                  |
-   +---lease expiry---+
+PENDING --claim(token N)--> CLAIMED --ack(token N)--> DONE
+   ^                          |  |
+   |                          |  +--attempt ceiling--> DEAD
+   |                          |
+   |                          +--failure below ceiling--> PENDING at retry_at
+   |                          |
+   +----lease expiry / reclaim with fresh token----------+
 ```
 
-Claim priority is deterministic: higher `priority`, then older creation time.
+A heartbeat may extend an unexpired matching claim, but only up to the configured maximum extension duration. `DEAD` events retain `last_error`, `dead_lettered_at`, attempt count, and an `EVENT_DEAD_LETTERED` journal record. Claim priority remains deterministic: higher `priority`, then older creation time.
 
 ## Crash model
 
@@ -158,13 +162,13 @@ V1 does not claim canonical JSON interoperability with every language/runtime. C
 
 Pre-Active distinguishes:
 
-- provider/model failure: retryable through the queue with bounded exponential delay;
+- provider/model failure: retryable through the queue with bounded exponential delay and a configurable attempt ceiling; exhaustion dead-letters the event and fails an associated running run;
 - daemon cycle exception: reported to stderr and polling continues after the engine has durably classified/requeued the work; `KeyboardInterrupt`/`SystemExit` still terminate normally;
 - malformed `task.requested` envelope: terminally journaled as `EVENT_REJECTED` and acknowledged rather than retried forever;
 - deterministic tool admission failure: reported to the run; host should repair configuration/input rather than blindly expand authority;
 - ambiguous mutation: fail closed into `BLOCKED_EFFECT`;
 - max-step exhaustion: deterministic run failure;
-- expired lease: recoverable queue ownership loss.
+- expired lease: recoverable queue ownership loss; a reclaim rotates the fencing token so the stale worker cannot commit queue progress.
 
 ## Extension seams
 

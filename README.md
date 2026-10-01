@@ -13,7 +13,10 @@ The repository description calls this a continuous execution environment for LLM
 ## What V1 provides
 
 - SQLite/WAL durable state with a lease-based event queue.
+- Fresh fencing tokens on every event claim/reclaim so stale workers cannot acknowledge, renew, or reschedule work they no longer own.
+- Bounded lease heartbeats keep healthy long model/tool operations owned without granting permanent ownership.
 - Event deduplication bound to exact kind/payload/priority, plus recovery after expired worker leases.
+- Bounded retry with configurable attempt ceilings, durable `DEAD` state, failure evidence, and dead-letter counts in `pre-active status`.
 - Interval schedules that emit idempotent events.
 - Durable runs and idempotently keyed run transcripts across model turns.
 - Atomic run creation + initial-step scheduling, with source-event-to-run binding so redelivered wakeups reuse the same run.
@@ -131,6 +134,12 @@ Run continuously:
 
 ```bash
 pre-active --state .pre-active/state.db daemon --poll-seconds 1
+
+# Optional reliability controls:
+# --lease-seconds 30
+# --lease-heartbeat-seconds 10
+# --max-lease-extension-seconds 900
+# --max-event-attempts 16
 ```
 
 Schedule a recurring task:
@@ -178,6 +187,7 @@ src/pre_active/
   context.py                 bounded context + memory assembly
   daemon.py                  scheduler/engine continuous loop
   engine.py                  durable ReAct-style execution loop
+  lease.py                   bounded fenced-claim heartbeat
   scheduler.py               interval event triggers
   store.py                   SQLite queue, runs, memory, journal
   tools.py                   capability gate + effect/idempotency ledger
