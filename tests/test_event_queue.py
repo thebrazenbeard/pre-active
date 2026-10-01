@@ -245,3 +245,71 @@ def test_dead_letter_and_run_failure_commit_together(tmp_path: Path) -> None:
     run = store.get_run(run_id)
     assert run["status"] == "FAILED"
     assert run["last_error"] == "permanent provider failure"
+
+
+def test_dead_event_can_be_explicitly_redriven_without_database_surgery(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    event_id = store.enqueue_event(
+        kind="probe",
+        payload={"value": 9},
+        dedup_key="redrive-probe",
+        now=1.0,
+    )
+    event = store.claim_event(worker_id="w1", now=2.0, lease_seconds=10.0)
+    assert event is not None and event.lease_token
+    assert store.fail_event(
+        event_id,
+        worker_id="w1",
+        lease_token=event.lease_token,
+        now=3.0,
+        max_attempts=1,
+        error="operator-fixable failure",
+    ) is True
+
+    assert hasattr(store, "redrive_event"), "Store.redrive_event is required"
+    store.redrive_event(event_id, now=10.0)
+
+    [row] = store.list_events(kind="probe")
+    assert row["status"] == "PENDING"
+    assert row["attempts"] == 0
+    assert row["last_error"] is None
+    assert row["dead_lettered_at"] is None
+    assert store.pending_event_count() == 1
+    assert store.dead_event_count() == 0
+    assert store.list_journal(subject_id=event_id)[-1]["event_type"] == "EVENT_REDRIVEN"
+
+
+def test_redriving_dead_run_step_resumes_only_its_exact_failed_run(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    run_id = store.create_run(task="recover me", capabilities=set(), now=1.0)
+    event_id = store.enqueue_event(
+        kind="run.step",
+        payload={"run_id": run_id, "step": 0},
+        dedup_key=f"run-step:{run_id}:0",
+        now=1.0,
+    )
+    event = store.claim_event(worker_id="w1", now=2.0, lease_seconds=10.0)
+    assert event is not None and event.lease_token
+    assert store.fail_event(
+        event_id,
+        worker_id="w1",
+        lease_token=event.lease_token,
+        now=3.0,
+        max_attempts=1,
+        error="provider outage exhausted",
+        failed_run_id=run_id,
+    ) is True
+
+    assert hasattr(store, "redrive_event"), "Store.redrive_event is required"
+    store.redrive_event(event_id, now=20.0)
+
+    run = store.get_run(run_id)
+    assert run["status"] == "RUNNING"
+    assert run["last_error"] is None
+    [row] = store.list_events(kind="run.step")
+    assert row["status"] == "PENDING"
+    assert row["attempts"] == 0
