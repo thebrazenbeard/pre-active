@@ -50,6 +50,12 @@ class LeaseHeartbeat:
         if self._thread is not None:
             raise RuntimeError("lease heartbeat already started")
         self._started_monotonic = time.monotonic()
+        connection = sqlite3.connect(self.state_path, timeout=5.0, isolation_level=None)
+        try:
+            self._renew_once(connection)
+        finally:
+            connection.close()
+        self.assert_owned()
         self._thread = threading.Thread(
             target=self._run,
             name=f"pre-active-lease-{self.event_id}",
@@ -74,40 +80,44 @@ class LeaseHeartbeat:
             if self._lost_reason is None:
                 self._lost_reason = reason
 
-    def _run(self) -> None:
+    def _renew_once(self, connection: sqlite3.Connection) -> None:
         assert self._started_monotonic is not None
+        if time.monotonic() - self._started_monotonic >= self.max_extension_seconds:
+            self._lose("maximum lease extension elapsed")
+            return
+        now = time.time()
+        lease_until = now + self.lease_seconds
+        try:
+            cursor = connection.execute(
+                """
+                UPDATE events
+                SET lease_until=?, updated_at=?
+                WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+                  AND lease_until IS NOT NULL AND lease_until > ?
+                """,
+                (
+                    lease_until,
+                    now,
+                    self.event_id,
+                    self.worker_id,
+                    self.lease_token,
+                    now,
+                ),
+            )
+        except sqlite3.Error as exc:
+            self._lose(f"lease heartbeat storage failure: {type(exc).__name__}: {exc}")
+            return
+        if cursor.rowcount != 1:
+            self._lose("event lease heartbeat lost lease ownership")
+
+    def _run(self) -> None:
         connection = sqlite3.connect(self.state_path, timeout=5.0, isolation_level=None)
         try:
             while not self._stop.wait(self.heartbeat_seconds):
-                if time.monotonic() - self._started_monotonic >= self.max_extension_seconds:
-                    self._lose("maximum lease extension elapsed")
-                    return
-
-                now = time.time()
-                lease_until = now + self.lease_seconds
-                try:
-                    cursor = connection.execute(
-                        """
-                        UPDATE events
-                        SET lease_until=?, updated_at=?
-                        WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
-                          AND lease_until IS NOT NULL AND lease_until > ?
-                        """,
-                        (
-                            lease_until,
-                            now,
-                            self.event_id,
-                            self.worker_id,
-                            self.lease_token,
-                            now,
-                        ),
-                    )
-                except sqlite3.Error as exc:
-                    self._lose(f"lease heartbeat storage failure: {type(exc).__name__}: {exc}")
-                    return
-                if cursor.rowcount != 1:
-                    self._lose("event lease heartbeat lost lease ownership")
-                    return
+                self._renew_once(connection)
+                with self._lock:
+                    if self._lost_reason is not None:
+                        return
         finally:
             connection.close()
 
