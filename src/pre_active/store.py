@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS runs (
     blocked_request_id TEXT,
     source_event_id TEXT UNIQUE,
     failed_event_id TEXT,
+    control_action TEXT,
+    control_reason TEXT,
+    control_requested_at REAL,
+    paused_event_id TEXT,
+    paused_at REAL,
+    cancelled_at REAL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -128,6 +134,16 @@ class Store:
             self.connection.execute("ALTER TABLE runs ADD COLUMN source_event_id TEXT")
         if "failed_event_id" not in run_columns:
             self.connection.execute("ALTER TABLE runs ADD COLUMN failed_event_id TEXT")
+        for column, ddl in (
+            ("control_action", "TEXT"),
+            ("control_reason", "TEXT"),
+            ("control_requested_at", "REAL"),
+            ("paused_event_id", "TEXT"),
+            ("paused_at", "REAL"),
+            ("cancelled_at", "REAL"),
+        ):
+            if column not in run_columns:
+                self.connection.execute(f"ALTER TABLE runs ADD COLUMN {column} {ddl}")
         self.connection.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS runs_source_event_idx ON runs(source_event_id) "
             "WHERE source_event_id IS NOT NULL"
@@ -347,7 +363,63 @@ class Store:
             "last_error": row["last_error"],
             "blocked_request_id": row["blocked_request_id"],
             "failed_event_id": row["failed_event_id"],
+            "control_action": row["control_action"],
+            "control_reason": row["control_reason"],
+            "control_requested_at": row["control_requested_at"],
+            "paused_event_id": row["paused_event_id"],
+            "paused_at": row["paused_at"],
+            "cancelled_at": row["cancelled_at"],
         }
+
+    def request_run_control(
+        self,
+        run_id: str,
+        *,
+        action: str,
+        reason: str | None,
+        now: float,
+    ) -> None:
+        normalized = action.upper()
+        if normalized not in {"PAUSE", "CANCEL"}:
+            raise ValueError("run control action must be PAUSE or CANCEL")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                """
+                SELECT status, control_action, control_reason
+                FROM runs WHERE id=?
+                """,
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            status = str(row["status"])
+            if status in {"COMPLETED", "FAILED", "CANCELLED"}:
+                raise RuntimeError(f"terminal run cannot accept control request: {status}")
+            current = row["control_action"]
+            if current == "CANCEL" and normalized == "PAUSE":
+                raise RuntimeError("cannot replace CANCEL with PAUSE")
+            if current == normalized and row["control_reason"] == reason:
+                self.connection.execute("COMMIT")
+                return
+            self.connection.execute(
+                """
+                UPDATE runs
+                SET control_action=?, control_reason=?, control_requested_at=?, updated_at=?
+                WHERE id=?
+                """,
+                (normalized, reason, now, now, run_id),
+            )
+            self.append_journal(
+                event_type="RUN_CONTROL_REQUESTED",
+                subject_id=run_id,
+                payload={"action": normalized, "reason": reason},
+                now=now,
+            )
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
 
     def _require_active_claim(
         self,
