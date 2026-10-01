@@ -796,3 +796,53 @@ def test_lease_extension_ceiling_blocks_stale_model_decision_persistence(tmp_pat
     run = store.get_run(run_id)
     assert run["status"] == "RUNNING"
     assert "LeaseLost" in run["last_error"]
+
+
+def test_final_progress_is_not_committed_after_claim_expires_during_persistence(
+    tmp_path: Path,
+) -> None:
+    import time
+    import pytest
+
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class FinalModel:
+        def respond(self, *, messages, tools):
+            return ModelResponse(final_text="must not commit stale")
+
+    engine = Engine(
+        store=store,
+        model=FinalModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+        lease_seconds=0.20,
+        lease_heartbeat_seconds=0.05,
+        max_lease_extension_seconds=0.12,
+    )
+    run_id = engine.submit_task("fence final commit", set(), now=time.time())
+
+    original_record = store.record_run_message
+
+    def delay_final_persistence(*, run_id, role, content, now, message_key=None):
+        if role == "assistant" and content == "must not commit stale":
+            time.sleep(0.35)
+        return original_record(
+            run_id=run_id,
+            role=role,
+            content=content,
+            now=now,
+            message_key=message_key,
+        )
+
+    store.record_run_message = delay_final_persistence  # type: ignore[method-assign]
+
+    with pytest.raises((LeaseLost, RuntimeError)):
+        engine.run_once(now=time.time())
+
+    run = store.get_run(run_id)
+    assert run["status"] == "RUNNING"
+    assert run["step_count"] == 0
+    assert run["final_text"] is None
