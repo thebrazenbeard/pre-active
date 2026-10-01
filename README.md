@@ -19,6 +19,7 @@ The repository description calls this a continuous execution environment for LLM
 - Bounded retry with configurable attempt ceilings, durable `DEAD` state, failure evidence, dead-letter inspection, and explicit single-event redrive.
 - Interval schedules that emit idempotent events.
 - Durable runs and idempotently keyed run transcripts across model turns.
+- Cooperative durable `pause`, `resume`, and `cancel` controls applied at fenced execution boundaries; cancellation never claims an already-dispatched external effect stopped.
 - Atomic run creation + initial-step scheduling, with source-event-to-run binding so redelivered wakeups reuse the same run.
 - Per-step durable model-decision fencing before any tool dispatch.
 - Salience/relevance-based memory selection under a bounded context budget.
@@ -159,6 +160,16 @@ pre-active --state .pre-active/state.db redrive <event-id>
 
 Redrive is intentionally one event at a time. It resets that event's attempt count and preserves its identity/dedup binding. A dead `run.step` may resume its run only when the event is recorded as the exact cause of that exact failed run generation.
 
+Control a durable run:
+
+```bash
+pre-active --state .pre-active/state.db pause <run-id> --reason "inspect state"
+pre-active --state .pre-active/state.db resume <run-id> --reason "continue"
+pre-active --state .pre-active/state.db cancel <run-id> --reason "stop work"
+```
+
+Pause/cancel are cooperative durable control requests. If they arrive before tool dispatch, no new tool effect starts. If they arrive while a tool is already executing, Pre-Active lets that operation return or become ambiguous, then applies control at the next safe boundary. An unresolved mutation remains `BLOCKED_EFFECT` until reconciliation; cancel does not erase uncertainty.
+
 The CLI intentionally does not expose arbitrary shell execution. Host applications register their own tools through `ToolRegistry`, with each tool bound to a named capability and an explicit `mutation` classification.
 
 ## Library sketch
@@ -209,7 +220,7 @@ docs/                        architecture, effect model, donor audit
 
 ## Non-goals
 
-V1 is not a distributed consensus system, a universal authorization service, a sandbox for untrusted code, a secret manager, or proof that an external effect occurred merely because a tool handler returned success. It also does not make a model continuously active unless a host process is running the daemon.
+V1 is not a distributed consensus system, a universal authorization service, a sandbox for untrusted code, a secret manager, or proof that an external effect occurred merely because a tool handler returned success. It does not force-kill in-flight tool handlers or claim a cancellation stopped an already-dispatched external operation. It also does not make a model continuously active unless a host process is running the daemon.
 
 ## License
 
