@@ -683,7 +683,7 @@ def test_long_model_call_keeps_event_lease_alive(tmp_path: Path) -> None:
 
     class SlowFinalModel:
         def respond(self, *, messages, tools):
-            time.sleep(0.40)
+            time.sleep(0.90)
             return ModelResponse(final_text="slow but healthy")
 
     engine = Engine(
@@ -693,14 +693,15 @@ def test_long_model_call_keeps_event_lease_alive(tmp_path: Path) -> None:
         context=ContextAssembler(store),
         system_prompt="Run.",
         worker_id="worker-primary",
-        lease_seconds=0.15,
+        lease_seconds=0.40,
+        lease_heartbeat_seconds=0.10,
     )
     run_id = engine.submit_task("slow model turn", set(), now=time.time())
 
     competing_claims = []
 
     def compete() -> None:
-        time.sleep(0.24)
+        time.sleep(0.65)
         competitor = Store(state)
         try:
             competing_claims.append(
