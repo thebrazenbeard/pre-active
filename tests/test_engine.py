@@ -681,10 +681,13 @@ def test_long_model_call_keeps_event_lease_alive(tmp_path: Path) -> None:
     state = tmp_path / "state.db"
     store = Store(state)
     tools = ToolRegistry(store)
+    model_started = threading.Event()
+    release_model = threading.Event()
 
     class SlowFinalModel:
         def respond(self, *, messages, tools):
-            time.sleep(0.90)
+            model_started.set()
+            assert release_model.wait(timeout=3.0)
             return ModelResponse(final_text="slow but healthy")
 
     engine = Engine(
@@ -695,33 +698,53 @@ def test_long_model_call_keeps_event_lease_alive(tmp_path: Path) -> None:
         system_prompt="Run.",
         worker_id="worker-primary",
         lease_seconds=0.40,
-        lease_heartbeat_seconds=0.10,
+        lease_heartbeat_seconds=0.05,
     )
-    run_id = engine.submit_task("slow model turn", set(), now=time.time())
+    run_id = engine.submit_task("slow model turn", set(), now=1.0)
 
-    competing_claims = []
+    results: list[str | None] = []
+    errors: list[BaseException] = []
 
-    def compete() -> None:
-        time.sleep(0.65)
-        competitor = Store(state)
+    def execute() -> None:
         try:
-            competing_claims.append(
-                competitor.claim_event(
-                    worker_id="worker-secondary",
-                    now=time.time(),
-                    lease_seconds=1.0,
-                )
-            )
-        finally:
-            competitor.close()
+            results.append(engine.run_once(now=2.0))
+        except BaseException as exc:
+            errors.append(exc)
 
-    contender = threading.Thread(target=compete)
-    contender.start()
-    result = engine.run_once(now=time.time())
-    contender.join(timeout=2.0)
+    runner = threading.Thread(target=execute)
+    runner.start()
+    assert model_started.wait(timeout=2.0)
 
-    assert result == run_id
-    assert competing_claims == [None]
+    competitor = Store(state)
+    try:
+        deadline = time.monotonic() + 2.0
+        renewed_until = 0.0
+        while time.monotonic() < deadline:
+            row = competitor.connection.execute(
+                "SELECT lease_until FROM events WHERE status='CLAIMED' LIMIT 1"
+            ).fetchone()
+            if row is not None and row["lease_until"] is not None:
+                renewed_until = float(row["lease_until"])
+                if renewed_until > 2.45:
+                    break
+            time.sleep(0.01)
+        assert renewed_until > 2.45
+
+        # Test beyond the original 2.40 lease expiry using the queue's explicit
+        # logical clock, rather than relying on CI wall-clock scheduling.
+        assert competitor.claim_event(
+            worker_id="worker-secondary",
+            now=2.41,
+            lease_seconds=1.0,
+        ) is None
+    finally:
+        competitor.close()
+        release_model.set()
+
+    runner.join(timeout=3.0)
+    assert not runner.is_alive()
+    assert errors == []
+    assert results == [run_id]
     assert store.get_run(run_id)["status"] == "COMPLETED"
 
 
