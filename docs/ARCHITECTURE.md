@@ -47,8 +47,19 @@ RUNNING -> COMPLETED
    |
    +----> FAILED
    |
-   +----> BLOCKED_EFFECT -> RUNNING  (only after reconciliation)
+   +----> PAUSED -> RUNNING
+   |         |
+   |         +----> CANCELLED
+   |
+   +----> CANCELLED
+   |
+   +----> BLOCKED_EFFECT -> RUNNING / PAUSED / CANCELLED
+                              (only after reconciliation)
 ```
+
+Pause and cancel are durable cooperative control. The operator writes control intent directly to run state so it cannot queue behind the work it is intended to stop. The engine checks that intent before inference, after inference before fresh decision admission, before tool dispatch, after tool return, and before final completion. A pre-dispatch pause retains the exact current event/generation; resume requeues that same event. A pause after a completed tool result advances the generation exactly once without scheduling the successor until resume.
+
+A cancel request does not terminate a worker process or prove an already-dispatched external operation stopped. If control arrives while a tool is executing, its result is classified first. An ambiguous mutation remains `BLOCKED_EFFECT`; reconciliation outranks pause/cancel. `RECONCILED_NO_EFFECT` plus pending control does not re-dispatch the mutation merely to complete recovery.
 
 `max_steps` bounds runaway tool/reasoning cycles. `max_event_attempts` bounds transient retry loops; the default is 16 attempts, deliberately above the historical ten-attempt backend-recovery observation recorded for the Windows runtime.
 
@@ -171,7 +182,10 @@ Pre-Active distinguishes:
 - ambiguous mutation: fail closed into `BLOCKED_EFFECT`;
 - max-step exhaustion: deterministic run failure;
 - expired lease: recoverable queue ownership loss; a reclaim rotates the fencing token, and fenced run-progress transactions prevent the stale worker from committing durable progress;
-- dead-letter exhaustion: terminal automatic retry state; an operator may inspect and explicitly redrive one exact event after correcting the underlying condition.
+- dead-letter exhaustion: terminal automatic retry state; an operator may inspect and explicitly redrive one exact event after correcting the underlying condition;
+- operator pause: cooperative safe-boundary transition to `PAUSED`, preserving the exact current generation;
+- operator cancel: cooperative terminal transition to `CANCELLED`; it is not evidence that an already-dispatched external operation was cancelled;
+- control during ambiguous mutation: `BLOCKED_EFFECT` remains authoritative until reconciliation resolves the effect outcome.
 
 ## Extension seams
 
