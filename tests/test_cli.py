@@ -72,3 +72,16 @@ def test_status_reports_dead_lettered_event_count(tmp_path: Path, capsys) -> Non
     payload = json.loads(capsys.readouterr().out)
     assert payload["pending_events"] == 0
     assert payload["dead_events"] == 1
+
+
+def test_cli_exposes_dead_letter_inspection_and_single_event_redrive() -> None:
+    import argparse
+
+    parser = build_parser()
+    subparsers = next(
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    assert "dead" in subparsers.choices
+    assert "redrive" in subparsers.choices
