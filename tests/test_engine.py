@@ -361,12 +361,14 @@ def test_task_requested_redelivery_reuses_the_same_run_after_pre_ack_crash(
     original_ack = store.ack_event
     crash_once = True
 
-    def crash_before_ack(event_id, *, worker_id, now):
+    def crash_before_ack(event_id, *, worker_id, lease_token, now):
         nonlocal crash_once
         if crash_once and event_id == source_event_id:
             crash_once = False
             raise RuntimeError("simulated crash before source-event ack")
-        return original_ack(event_id, worker_id=worker_id, now=now)
+        return original_ack(
+            event_id, worker_id=worker_id, lease_token=lease_token, now=now
+        )
 
     store.ack_event = crash_before_ack  # type: ignore[method-assign]
 
