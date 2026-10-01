@@ -19,6 +19,7 @@ class LeaseHeartbeat:
         event_id: str,
         worker_id: str,
         lease_token: str,
+        claimed_at: float,
         lease_seconds: float,
         heartbeat_seconds: float | None = None,
         max_extension_seconds: float = 900.0,
@@ -37,6 +38,7 @@ class LeaseHeartbeat:
         self.event_id = event_id
         self.worker_id = worker_id
         self.lease_token = lease_token
+        self.claimed_at = float(claimed_at)
         self.lease_seconds = float(lease_seconds)
         self.heartbeat_seconds = float(interval)
         self.max_extension_seconds = float(max_extension_seconds)
@@ -85,7 +87,8 @@ class LeaseHeartbeat:
         if time.monotonic() - self._started_monotonic >= self.max_extension_seconds:
             self._lose("maximum lease extension elapsed")
             return
-        now = time.time()
+        elapsed = time.monotonic() - self._started_monotonic
+        now = self.claimed_at + elapsed
         lease_until = now + self.lease_seconds
         try:
             cursor = connection.execute(
