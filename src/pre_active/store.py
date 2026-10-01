@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS events (
     available_at REAL NOT NULL,
     lease_owner TEXT,
     lease_until REAL,
+    lease_token TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -95,6 +96,7 @@ class Event:
     attempts: int
     lease_owner: str | None
     lease_until: float | None
+    lease_token: str | None
 
 
 class Store:
@@ -104,6 +106,9 @@ class Store:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.executescript(_SCHEMA)
+        event_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(events)")}
+        if "lease_token" not in event_columns:
+            self.connection.execute("ALTER TABLE events ADD COLUMN lease_token TEXT")
         run_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(runs)")}
         if "blocked_request_id" not in run_columns:
             self.connection.execute("ALTER TABLE runs ADD COLUMN blocked_request_id TEXT")
@@ -554,13 +559,46 @@ class Store:
             for _, _, _, row in scored[:limit]
         ]
 
-    def ack_event(self, event_id: str, *, worker_id: str, now: float) -> None:
+    def renew_event_lease(
+        self,
+        event_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        now: float,
+        lease_seconds: float,
+    ) -> float:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be > 0")
+        lease_until = now + lease_seconds
         cursor = self.connection.execute(
             """
-            UPDATE events SET status='DONE', lease_owner=NULL, lease_until=NULL, updated_at=?
-            WHERE id=? AND status='CLAIMED' AND lease_owner=?
+            UPDATE events
+            SET lease_until=?, updated_at=?
+            WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+              AND lease_until IS NOT NULL AND lease_until > ?
             """,
-            (now, event_id, worker_id),
+            (lease_until, now, event_id, worker_id, lease_token, now),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("event lease renewal lost lease ownership")
+        return lease_until
+
+    def ack_event(
+        self,
+        event_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        now: float,
+    ) -> None:
+        cursor = self.connection.execute(
+            """
+            UPDATE events
+            SET status='DONE', lease_owner=NULL, lease_until=NULL, lease_token=NULL, updated_at=?
+            WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
+            """,
+            (now, event_id, worker_id, lease_token),
         )
         if cursor.rowcount != 1:
             raise RuntimeError("event acknowledgement lost lease ownership")
@@ -571,13 +609,23 @@ class Store:
             now=now,
         )
 
-    def fail_event(self, event_id: str, *, worker_id: str, now: float, retry_at: float | None = None) -> None:
+    def fail_event(
+        self,
+        event_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        now: float,
+        retry_at: float | None = None,
+    ) -> None:
         cursor = self.connection.execute(
             """
-            UPDATE events SET status='PENDING', lease_owner=NULL, lease_until=NULL, available_at=?, updated_at=?
-            WHERE id=? AND status='CLAIMED' AND lease_owner=?
+            UPDATE events
+            SET status='PENDING', lease_owner=NULL, lease_until=NULL, lease_token=NULL,
+                available_at=?, updated_at=?
+            WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
             """,
-            (now if retry_at is None else retry_at, now, event_id, worker_id),
+            (now if retry_at is None else retry_at, now, event_id, worker_id, lease_token),
         )
         if cursor.rowcount != 1:
             raise RuntimeError("event failure update lost lease ownership")
@@ -618,6 +666,8 @@ class Store:
     def claim_event(
         self, *, worker_id: str, now: float, lease_seconds: float
     ) -> Event | None:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be > 0")
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             row = self.connection.execute(
@@ -638,13 +688,15 @@ class Store:
                 return None
             attempts = int(row["attempts"]) + 1
             lease_until = now + lease_seconds
+            lease_token = str(uuid.uuid4())
             self.connection.execute(
                 """
                 UPDATE events
-                SET status='CLAIMED', lease_owner=?, lease_until=?, attempts=?, updated_at=?
+                SET status='CLAIMED', lease_owner=?, lease_until=?, lease_token=?,
+                    attempts=?, updated_at=?
                 WHERE id=?
                 """,
-                (worker_id, lease_until, attempts, now, row["id"]),
+                (worker_id, lease_until, lease_token, attempts, now, row["id"]),
             )
             self.append_journal(
                 event_type="EVENT_CLAIMED",
@@ -665,4 +717,5 @@ class Store:
             attempts=attempts,
             lease_owner=worker_id,
             lease_until=lease_until,
+            lease_token=lease_token,
         )
