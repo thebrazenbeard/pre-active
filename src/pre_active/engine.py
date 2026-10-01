@@ -27,6 +27,10 @@ class ModelResponse:
             raise ValueError("model response must contain exactly one of final_text or tool_call")
 
 
+class RunControlApplied(RuntimeError):
+    """Internal signal that durable run control stopped tool dispatch."""
+
+
 class ModelAdapter(Protocol):
     def respond(
         self, *, messages: list[dict[str, str]], tools: list[dict[str, Any]]
@@ -385,6 +389,15 @@ class Engine:
                         now=transition_now,
                         message_key=f"step:{run['step_count']}:assistant-decision",
                     )
+                def before_tool_dispatch() -> None:
+                    heartbeat.assert_owned()
+                    if self._apply_pending_control(
+                        event=event,
+                        run_id=run_id,
+                        heartbeat=heartbeat,
+                    ) is not None:
+                        raise RunControlApplied()
+
                 try:
                     result = self.tools.execute(
                         name=call.name,
@@ -392,8 +405,11 @@ class Engine:
                         request_id=call.request_id,
                         allowed_capabilities=run["capabilities"],
                         now=now,
+                        before_dispatch=before_tool_dispatch,
                     )
                     heartbeat.assert_owned()
+                except RunControlApplied:
+                    return run_id
                 except BaseException as exc:
                     effect_state = self.tools.effect_state(call.request_id)
                     if effect_state in {"EXECUTING", "ATTEMPTED_UNKNOWN"}:
