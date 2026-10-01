@@ -71,7 +71,17 @@ class LeaseHeartbeat:
         if thread is not None:
             thread.join(timeout=max(1.0, self.heartbeat_seconds * 2.0))
 
+    def current_time(self) -> float:
+        if self._started_monotonic is None:
+            raise RuntimeError("lease heartbeat has not started")
+        return self.claimed_at + (time.monotonic() - self._started_monotonic)
+
     def assert_owned(self) -> None:
+        if (
+            self._started_monotonic is not None
+            and time.monotonic() - self._started_monotonic >= self.max_extension_seconds
+        ):
+            self._lose("maximum lease extension elapsed")
         with self._lock:
             reason = self._lost_reason
         if reason is not None:
@@ -88,7 +98,7 @@ class LeaseHeartbeat:
             self._lose("maximum lease extension elapsed")
             return
         elapsed = time.monotonic() - self._started_monotonic
-        now = self.claimed_at + elapsed
+        now = self.current_time()
         lease_until = now + self.lease_seconds
         try:
             cursor = connection.execute(
