@@ -102,6 +102,10 @@ Pre-Active provides cooperative durable control, not arbitrary process killing.
 
 **ACCEPTED AS A DESIGN HAZARD.** Tool result + generation advance must commit before entering PAUSED; resume starts at the next generation. Pause before dispatch keeps the current event/generation.
 
+> **HOSTILE REVIEWER:** An engine-side control check can still race with tool dispatch after the assistant tool-call transcript is persisted.
+
+**ACCEPTED.** `ToolRegistry.execute` exposes a provider-neutral `before_dispatch` hook. The engine supplies a final fenced control check through that hook immediately before any read handler or mutation-ledger admission can start. This narrows the cooperative cancellation boundary to the actual dispatch seam without embedding run-control policy inside the tool layer.
+
 ## Claim ceiling
 
 Source-level cooperative run control only. This does not prove an already-dispatched external operation was cancelled and does not terminate live host processes.
