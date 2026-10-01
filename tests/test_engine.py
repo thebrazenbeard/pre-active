@@ -961,3 +961,65 @@ def test_retryable_model_error_keeps_run_pending_for_retry(tmp_path: Path) -> No
     [event] = store.list_events(kind="run.step")
     assert event["status"] == "PENDING"
     assert event["attempts"] == 1
+
+
+def test_retryable_model_error_honors_retry_after_as_minimum_delay(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class BusyModel:
+        def respond(self, *, messages, tools):
+            raise RetryableModelError(
+                "come back later",
+                category="throttling",
+                retry_after_seconds=12.0,
+            )
+
+    engine = Engine(
+        store=store,
+        model=BusyModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+    )
+    engine.submit_task("respect retry-after", set(), now=1.0)
+
+    import pytest
+
+    with pytest.raises(RetryableModelError):
+        engine.run_once(now=2.0)
+
+    row = store.connection.execute(
+        "SELECT available_at, attempts FROM events WHERE kind='run.step'"
+    ).fetchone()
+    assert row is not None
+    assert row["attempts"] == 1
+    assert row["available_at"] == 14.0
+
+
+def test_retryable_model_backoff_adds_stable_subsecond_jitter() -> None:
+    import pre_active.engine as engine_module
+
+    assert hasattr(engine_module, "_model_retry_delay_seconds")
+
+    first = engine_module._model_retry_delay_seconds(
+        event_id="event-a",
+        attempts=1,
+        retry_after_seconds=None,
+    )
+    repeated = engine_module._model_retry_delay_seconds(
+        event_id="event-a",
+        attempts=1,
+        retry_after_seconds=None,
+    )
+    other = engine_module._model_retry_delay_seconds(
+        event_id="event-b",
+        attempts=1,
+        retry_after_seconds=None,
+    )
+
+    assert first == repeated
+    assert 2.0 <= first < 3.0
+    assert 2.0 <= other < 3.0
+    assert first != other
