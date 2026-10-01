@@ -119,8 +119,31 @@ QUEUE_LEASE != VERIFIED_EFFECT
 
 Mutation safety continues to come from the effect ledger, stable model-decision binding, and reconciliation barrier described above.
 
+### Fenced durable progress
+
+Heartbeat checks alone are not treated as sufficient because a lease can expire between a check and a durable write. Fresh model-decision admission and run-progress commits therefore occur inside a SQLite write transaction that first validates the exact event ID, worker ID, fencing token, and unexpired lease. The heartbeat ceiling is rechecked before commit.
+
+For a successful tool step, the tool-result transcript, run-generation advance, successor event, and acknowledgement of the current event commit together under that fence. Final-text completion and acknowledgement likewise commit together. This is queue/run fencing; it does not convert a tool result into verified external effect evidence.
+
 ## Retry exhaustion and dead letters
 
 Transient engine failures retry with bounded exponential delay until the configured event-attempt ceiling. At the ceiling, the exact claimed event moves atomically to `DEAD`, clears its lease, records the last error and dead-letter timestamp, and appends `EVENT_DEAD_LETTERED` evidence. An associated `RUNNING` run moves to `FAILED`.
 
 Dead-lettering does not assert that an external mutation failed or did not occur. If a mutation outcome is ambiguous, the existing `BLOCKED_EFFECT` path takes precedence; that state must still be reconciled from external evidence rather than converted into a retry/dead-letter assumption.
+
+
+## Dead-letter inspection and redrive
+
+A `DEAD` event is durable operator evidence, not deletion. `pre-active dead` lists dead events with their payload, attempt count, last error, and dead-letter timestamp.
+
+Redrive is explicit and one event at a time:
+
+```text
+DEAD --operator redrive--> PENDING
+```
+
+Redrive resets the event attempt count and retry evidence fields while preserving the event ID, payload, priority, and dedup binding. It appends `EVENT_REDRIVEN` with the prior attempts/error/dead-letter timestamp.
+
+For `run.step` events, Pre-Active also records the exact dead-letter event ID on the failed run. A redrive may move that run back to `RUNNING` only when all of these still match: the run is `FAILED`, its `failed_event_id` is the redriven event, and the event's step equals the run's current generation. This prevents a generic dead event from resurrecting an unrelated or subsequently changed run.
+
+Redrive does not bypass `BLOCKED_EFFECT`. Ambiguous mutations still require reconciliation evidence before any retry.
