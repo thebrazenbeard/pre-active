@@ -1441,6 +1441,145 @@ class Store:
             for row in rows
         ]
 
+    def operational_snapshot(self, *, now: float) -> dict[str, Any]:
+        event_statuses = ("PENDING", "CLAIMED", "DONE", "DEAD", "PAUSED", "CANCELLED")
+        run_statuses = (
+            "RUNNING",
+            "COMPLETED",
+            "FAILED",
+            "BLOCKED_EFFECT",
+            "PAUSED",
+            "CANCELLED",
+        )
+
+        owns_transaction = not self.connection.in_transaction
+        if owns_transaction:
+            self.connection.execute("BEGIN")
+        try:
+            event_counts = {status: 0 for status in event_statuses}
+            for row in self.connection.execute(
+                "SELECT status, COUNT(*) AS n FROM events GROUP BY status"
+            ).fetchall():
+                event_counts[str(row["status"])] = int(row["n"])
+
+            run_counts = {status: 0 for status in run_statuses}
+            for row in self.connection.execute(
+                "SELECT status, COUNT(*) AS n FROM runs GROUP BY status"
+            ).fetchall():
+                run_counts[str(row["status"])] = int(row["n"])
+
+            def scalar(query: str, params: tuple[Any, ...] = ()) -> int:
+                row = self.connection.execute(query, params).fetchone()
+                return 0 if row is None else int(row["n"])
+
+            def oldest_age(query: str, params: tuple[Any, ...]) -> float | None:
+                row = self.connection.execute(query, params).fetchone()
+                if row is None or row["ts"] is None:
+                    return None
+                return max(0.0, float(now) - float(row["ts"]))
+
+            ready_pending = scalar(
+                """
+                SELECT COUNT(*) AS n FROM events
+                WHERE status='PENDING' AND available_at <= ?
+                """,
+                (now,),
+            )
+            delayed_pending = scalar(
+                """
+                SELECT COUNT(*) AS n FROM events
+                WHERE status='PENDING' AND available_at > ?
+                """,
+                (now,),
+            )
+            retry_pending = scalar(
+                """
+                SELECT COUNT(*) AS n FROM events
+                WHERE status='PENDING' AND attempts > 0
+                """
+            )
+            active_claims = scalar(
+                """
+                SELECT COUNT(*) AS n FROM events
+                WHERE status='CLAIMED' AND lease_until IS NOT NULL AND lease_until > ?
+                """,
+                (now,),
+            )
+            expired_claims = scalar(
+                """
+                SELECT COUNT(*) AS n FROM events
+                WHERE status='CLAIMED' AND lease_until IS NOT NULL AND lease_until <= ?
+                """,
+                (now,),
+            )
+
+            schedules = self.connection.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) AS enabled_count,
+                    SUM(CASE WHEN enabled=1 AND next_at <= ? THEN 1 ELSE 0 END) AS due_count
+                FROM schedules
+                """,
+                (now,),
+            ).fetchone()
+
+            snapshot = {
+                "observed_at": float(now),
+                "pending_events": event_counts.get("PENDING", 0)
+                + event_counts.get("CLAIMED", 0),
+                "dead_events": event_counts.get("DEAD", 0),
+                "events": {
+                    "by_status": event_counts,
+                    "ready_pending": ready_pending,
+                    "delayed_pending": delayed_pending,
+                    "retry_pending": retry_pending,
+                    "active_claims": active_claims,
+                    "expired_claims": expired_claims,
+                    "oldest_ready_age_seconds": oldest_age(
+                        """
+                        SELECT MIN(created_at) AS ts FROM events
+                        WHERE status='PENDING' AND available_at <= ?
+                        """,
+                        (now,),
+                    ),
+                    "oldest_expired_lease_age_seconds": oldest_age(
+                        """
+                        SELECT MIN(lease_until) AS ts FROM events
+                        WHERE status='CLAIMED'
+                          AND lease_until IS NOT NULL AND lease_until <= ?
+                        """,
+                        (now,),
+                    ),
+                    "oldest_dead_age_seconds": oldest_age(
+                        """
+                        SELECT MIN(dead_lettered_at) AS ts FROM events
+                        WHERE status='DEAD' AND dead_lettered_at IS NOT NULL
+                        """,
+                        (),
+                    ),
+                },
+                "runs": run_counts,
+                "schedules": {
+                    "enabled": (
+                        0
+                        if schedules is None or schedules["enabled_count"] is None
+                        else int(schedules["enabled_count"])
+                    ),
+                    "due": (
+                        0
+                        if schedules is None or schedules["due_count"] is None
+                        else int(schedules["due_count"])
+                    ),
+                },
+            }
+            if owns_transaction:
+                self.connection.execute("COMMIT")
+            return snapshot
+        except BaseException:
+            if owns_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
+
     def pending_event_count(self) -> int:
         row = self.connection.execute(
             "SELECT COUNT(*) AS n FROM events WHERE status IN ('PENDING','CLAIMED')"

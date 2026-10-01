@@ -148,16 +148,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"memory_id": memory_id}, sort_keys=True))
             return 0
         if args.command == "status":
-            rows = store.connection.execute(
-                "SELECT status, COUNT(*) AS n FROM runs GROUP BY status ORDER BY status"
-            ).fetchall()
             print(
                 json.dumps(
-                    {
-                        "pending_events": store.pending_event_count(),
-                        "dead_events": store.dead_event_count(),
-                        "runs": {str(row["status"]): int(row["n"]) for row in rows},
-                    },
+                    store.operational_snapshot(now=now),
                     sort_keys=True,
                 )
             )

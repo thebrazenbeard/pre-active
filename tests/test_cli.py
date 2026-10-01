@@ -215,3 +215,44 @@ def test_resume_cli_requeues_paused_run(tmp_path: Path, capsys) -> None:
     assert resumed["id"] == event["id"]
     assert resumed["status"] == "PENDING"
     reopened.close()
+
+
+def test_status_cli_emits_operational_snapshot_with_compatibility_fields(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    state = tmp_path / "state.db"
+    store = Store(state)
+    store.enqueue_event(
+        kind="probe",
+        payload={"value": "ready"},
+        dedup_key="status-ready",
+        now=1.0,
+        available_at=1.0,
+    )
+    store.enqueue_event(
+        kind="probe",
+        payload={"value": "later"},
+        dedup_key="status-later",
+        now=2.0,
+        available_at=20.0,
+    )
+    run_id = store.create_run(task="blocked", capabilities=set(), now=3.0)
+    store.connection.execute(
+        "UPDATE runs SET status='BLOCKED_EFFECT' WHERE id=?",
+        (run_id,),
+    )
+    store.close()
+
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 10.0)
+    assert main(["--state", str(state), "status"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["observed_at"] == 10.0
+    assert payload["pending_events"] == 2
+    assert payload["dead_events"] == 0
+    assert payload["runs"]["BLOCKED_EFFECT"] == 1
+    assert payload["events"]["ready_pending"] == 1
+    assert payload["events"]["delayed_pending"] == 1
+    assert payload["schedules"] == {"due": 0, "enabled": 0}
