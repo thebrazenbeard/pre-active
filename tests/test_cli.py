@@ -85,3 +85,40 @@ def test_cli_exposes_dead_letter_inspection_and_single_event_redrive() -> None:
     )
     assert "dead" in subparsers.choices
     assert "redrive" in subparsers.choices
+
+
+def test_dead_and_redrive_cli_round_trip(tmp_path: Path, capsys) -> None:
+    state = tmp_path / "state.db"
+    store = Store(state)
+    event_id = store.enqueue_event(
+        kind="probe",
+        payload={"value": 42},
+        dedup_key="cli-redrive",
+        now=1.0,
+    )
+    event = store.claim_event(worker_id="w1", now=2.0, lease_seconds=10.0)
+    assert event is not None and event.lease_token
+    assert store.fail_event(
+        event_id,
+        worker_id="w1",
+        lease_token=event.lease_token,
+        now=3.0,
+        max_attempts=1,
+        error="needs operator retry",
+    ) is True
+    store.close()
+
+    assert main(["--state", str(state), "dead"]) == 0
+    dead_payload = json.loads(capsys.readouterr().out)
+    assert [item["id"] for item in dead_payload["events"]] == [event_id]
+    assert dead_payload["events"][0]["last_error"] == "needs operator retry"
+
+    assert main(["--state", str(state), "redrive", event_id]) == 0
+    redrive_payload = json.loads(capsys.readouterr().out)
+    assert redrive_payload == {"event_id": event_id, "status": "PENDING"}
+
+    reopened = Store(state)
+    [row] = reopened.list_events(kind="probe")
+    assert row["status"] == "PENDING"
+    assert row["attempts"] == 0
+    reopened.close()
