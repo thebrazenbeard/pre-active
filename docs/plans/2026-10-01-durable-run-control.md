@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Branch is stacked on resilience PR #13 exact head `c4addb123ca5dd2b282c9b446b36273c439f1edd`.
+- Branch was created from resilience PR #13 head `c4addb123ca5dd2b282c9b446b36273c439f1edd` and carries the later deterministic heartbeat-test correction from PR #13. Final stacked verification must compare against the latest PR #13 head.
 - Do not merge or install/cut over live Lappy runtime.
 - Never claim cancellation stopped an external mutation already dispatched.
 - Never bypass `BLOCKED_EFFECT` or reconciliation.
@@ -31,9 +31,9 @@
 - Produces `Store.resume_paused_run(run_id, reason, now)`.
 - Extends `Store.get_run()` with control metadata.
 
-- [ ] Add failing tests for PAUSE/CANCEL request persistence and terminal-state rejection.
-- [ ] Add SQLite migrations for control action/reason/timestamp and paused event binding.
-- [ ] Journal `RUN_CONTROL_REQUESTED`, `RUN_PAUSED`, `RUN_RESUMED`, and `RUN_CANCELLED`.
+- [x] Add failing tests for PAUSE/CANCEL request persistence and terminal-state rejection.
+- [x] Add SQLite migrations for control action/reason/timestamp and paused event binding.
+- [x] Journal `RUN_CONTROL_REQUESTED`, `RUN_PAUSED`, `RUN_RESUMED`, and `RUN_CANCELLED`.
 
 ### Task 2: Engine safe-boundary control
 
@@ -46,28 +46,27 @@
 - Engine checks durable control before model work, before tool dispatch, and after tool return.
 - Store applies pause/cancel atomically under the active event claim.
 
-- [ ] Test pause before inference prevents model invocation.
-- [ ] Test cancel during model inference discards returned decision and cancels before tool dispatch.
-- [ ] Test pause/cancel arriving during a tool call lets the call finish, records its result, then stops before successor work.
-- [ ] Ensure paused pre-dispatch events resume with the same event identity/generation.
-- [ ] Ensure post-tool pause advances generation once and resumes at the successor generation.
+- [x] Test pause before inference prevents model invocation.
+- [x] Test cancel during model inference discards returned decision and cancels before tool dispatch.
+- [x] Test pause/cancel arriving during a tool call lets the call finish, records its result, then stops before successor work.
+- [x] Ensure paused pre-dispatch events resume with the same event identity/generation.
+- [x] Ensure post-tool pause advances generation once and resumes at the successor generation.
 
 ### Task 3: Ambiguous-effect precedence
 
 **Files:**
-- Modify: `src/pre_active/tools.py`
 - Modify: `src/pre_active/engine.py`
-- Test: `tests/test_engine.py`
-- Test: `tests/test_tools.py`
+- Modify: `src/pre_active/store.py`
+- Test: `tests/test_run_control.py`
 
 **Interfaces:**
-- Add a non-dispatching reconciled-effect inspection seam so CANCEL/PAUSE can honor reconciliation without accidentally retrying `RECONCILED_NO_EFFECT`.
-- `Engine.resume_blocked_effect` applies pending control after reconciliation.
+- Reuse the existing `ToolRegistry.effect_state()` seam rather than adding a duplicate effect API.
+- `Engine.resume_blocked_effect` applies pending control after reconciliation without retrying `RECONCILED_NO_EFFECT` solely for recovery.
 
-- [ ] Test CANCEL during `BLOCKED_EFFECT` remains blocked before reconciliation.
-- [ ] Test confirmed effect records result then cancels.
-- [ ] Test confirmed no-effect + CANCEL does not invoke the mutation handler.
-- [ ] Test confirmed no-effect + PAUSE pauses before retry; resume preserves exact stored request identity.
+- [x] Test CANCEL during `BLOCKED_EFFECT` remains blocked before reconciliation.
+- [x] Test confirmed effect records result then cancels.
+- [x] Test confirmed no-effect + CANCEL does not invoke the mutation handler.
+- [x] Test confirmed no-effect + PAUSE pauses before retry; resume preserves exact stored request identity.
 
 ### Task 4: Operator CLI and documentation
 
@@ -83,7 +82,7 @@
 - `pre-active resume <run-id> [--reason ...]`
 - `pre-active cancel <run-id> [--reason ...]`
 
-- [ ] Add CLI round-trip tests.
-- [ ] Document cooperative-control and external-effect ceilings.
-- [ ] Run package build, compileall, and pytest across Python 3.11/3.12/3.13.
-- [ ] Verify stacked diff against PR #13 head and open a Draft PR targeting the resilience branch.
+- [x] Add CLI round-trip tests.
+- [x] Document cooperative-control and external-effect ceilings.
+- [x] Run package build, compileall, and pytest across Python 3.11/3.12/3.13.
+- [x] Verify stacked diff against PR #13 head and open a Draft PR targeting the resilience branch.
