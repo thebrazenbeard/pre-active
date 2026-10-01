@@ -34,3 +34,14 @@ def test_runtime_cli_exposes_bounded_lease_heartbeat_controls() -> None:
     assert args.lease_seconds == 30.0
     assert args.lease_heartbeat_seconds == 7.0
     assert args.max_lease_extension_seconds == 600.0
+
+
+def test_runtime_cli_exposes_event_attempt_ceiling() -> None:
+    args = build_parser().parse_args([
+        "run-once",
+        "--base-url", "http://127.0.0.1:1/v1",
+        "--model", "test-model",
+        "--max-event-attempts", "20",
+    ])
+
+    assert args.max_event_attempts == 20
