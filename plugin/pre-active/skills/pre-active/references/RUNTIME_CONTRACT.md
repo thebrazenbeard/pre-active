@@ -6,8 +6,8 @@ Use this reference when operating a workstation-bound Pre-Active runtime.
 
 The current source configuration expects:
 
-- runtime root: `C:\\ProgramData\\PreActive`
-- state database: `C:\\ProgramData\\PreActive\\state\\state.db`
+- runtime root: `C:\ProgramData\PreActive`
+- state database: `C:\ProgramData\PreActive\\state\\state.db`
 - Python entrypoint: `python -m pre_active`
 - local model endpoint: `http://127.0.0.1:18081/v1`
 - scheduled-task prefix: `PreActive`
