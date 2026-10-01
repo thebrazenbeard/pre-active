@@ -505,3 +505,96 @@ def test_cancel_paused_run_applies_immediately_without_worker_cycle(tmp_path: Pa
     [event] = store.list_events(kind="run.step")
     assert event["status"] == "CANCELLED"
     assert store.pending_event_count() == 0
+
+
+def test_cancel_after_tool_decision_persistence_still_prevents_handler_dispatch(
+    tmp_path: Path,
+) -> None:
+    import threading
+
+    state = tmp_path / "state.db"
+    store = Store(state)
+    tools = ToolRegistry(store)
+    run_id_holder: dict[str, str] = {}
+    assistant_persisted = threading.Event()
+    cancel_written = threading.Event()
+    handler_calls: list[int] = []
+
+    tools.register(
+        ToolSpec(
+            name="read.value",
+            description="read",
+            input_schema={"type": "object"},
+            capability="read",
+            mutation=False,
+        ),
+        lambda args: handler_calls.append(1) or {"value": 1},
+    )
+
+    class ToolModel:
+        def respond(self, *, messages, tools):
+            return ModelResponse(
+                tool_call=ToolCall(
+                    request_id="cancel-before-dispatch",
+                    name="read.value",
+                    arguments={},
+                )
+            )
+
+    original_record = store.record_run_message
+
+    def signal_after_assistant_persistence(*, run_id, role, content, now, message_key=None):
+        result = original_record(
+            run_id=run_id,
+            role=role,
+            content=content,
+            now=now,
+            message_key=message_key,
+        )
+        if role == "assistant" and "cancel-before-dispatch" in content:
+            assistant_persisted.set()
+        return result
+
+    store.record_run_message = signal_after_assistant_persistence  # type: ignore[method-assign]
+
+    original_execute = tools.execute
+
+    def wait_for_cancel_before_dispatch(**kwargs):
+        assert cancel_written.wait(timeout=2.0)
+        return original_execute(**kwargs)
+
+    tools.execute = wait_for_cancel_before_dispatch  # type: ignore[method-assign]
+
+    def cancel_after_persist() -> None:
+        assert assistant_persisted.wait(timeout=2.0)
+        operator = Store(state)
+        try:
+            operator.request_run_control(
+                run_id_holder["run_id"],
+                action="CANCEL",
+                reason="cancel before handler dispatch",
+                now=2.5,
+            )
+        finally:
+            operator.close()
+            cancel_written.set()
+
+    engine = Engine(
+        store=store,
+        model=ToolModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+    )
+    run_id = engine.submit_task("cancel after decision persistence", {"read"}, now=1.0)
+    run_id_holder["run_id"] = run_id
+
+    operator_thread = threading.Thread(target=cancel_after_persist)
+    operator_thread.start()
+    assert engine.run_once(now=2.0) == run_id
+    operator_thread.join(timeout=3.0)
+
+    assert not operator_thread.is_alive()
+    assert handler_calls == []
+    assert store.get_run(run_id)["status"] == "CANCELLED"
