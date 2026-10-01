@@ -4,6 +4,8 @@
 
 **Durable continuous execution for tool-using language models.**
 
+The name is deliberate: **Pre-Active** is a preemptive active runtime, and a play on being proactive—work can be durably queued, resumed, and advanced by an active host process instead of requiring every step to begin with a fresh interactive prompt.
+
 Pre-Active turns a stateless model call into a recoverable execution process: events wake work, durable state survives process restarts, relevant memory is injected into context, model turns are constrained to structured tool calls or a final answer, and external mutations are fenced behind idempotency and reconciliation rules.
 
 The repository description calls this a continuous execution environment for LLM autonomy. In concrete terms, Pre-Active provides **process-level autonomy while a Pre-Active daemon is actually running**. It does not imply hidden activity when no process is running, model consciousness, unrestricted authority, or permission to perform effects a host has not granted.
