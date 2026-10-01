@@ -870,3 +870,19 @@ def test_final_progress_is_not_committed_after_claim_expires_during_persistence(
     assert run["status"] == "RUNNING"
     assert run["step_count"] == 0
     assert run["final_text"] is None
+
+
+def test_model_error_contract_distinguishes_retryable_and_permanent_failures() -> None:
+    import pre_active.engine as engine_module
+
+    assert hasattr(engine_module, "RetryableModelError")
+    assert hasattr(engine_module, "NonRetryableModelError")
+
+    retryable = engine_module.RetryableModelError(
+        "rate limited",
+        category="throttling",
+        retry_after_seconds=12.0,
+    )
+    assert retryable.category == "throttling"
+    assert retryable.retry_after_seconds == 12.0
+    assert isinstance(engine_module.NonRetryableModelError("bad auth"), RuntimeError)
