@@ -31,5 +31,5 @@ class Daemon:
             try:
                 self.cycle(now=time.time())
             except Exception as exc:
-                print(f"pro-run cycle failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+                print(f"pre-active cycle failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             time.sleep(poll_seconds)

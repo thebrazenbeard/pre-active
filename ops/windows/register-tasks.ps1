@@ -1,5 +1,5 @@
 param(
-    [string]$Root = "C:\ProgramData\ProRun"
+    [string]$Root = "C:\ProgramData\PreActive"
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,7 +10,7 @@ $required = @(
     (Join-Path $Root "model-env\Lib\site-packages"),
     (Join-Path $Root "runtime\qwen_http.py"),
     (Join-Path $Root "runtime\start-qwen.ps1"),
-    (Join-Path $Root "runtime\start-prorun.ps1"),
+    (Join-Path $Root "runtime\start-pre-active.ps1"),
     (Join-Path $Root "runtime\watchdog.ps1"),
     (Join-Path $Root "runtime\model-path.txt")
 )
@@ -26,7 +26,7 @@ $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccou
 $boot = New-ScheduledTaskTrigger -AtStartup
 $longSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 
-function Register-ProRunLongTask {
+function Register-PreActiveLongTask {
     param(
         [string]$Name,
         [string]$Script
@@ -36,16 +36,16 @@ function Register-ProRunLongTask {
     Register-ScheduledTask -TaskName $Name -Action $action -Trigger $boot -Principal $principal -Settings $longSettings -Force | Out-Null
 }
 
-Register-ProRunLongTask -Name "ProRun Qwen Endpoint" -Script (Join-Path $Root "runtime\start-qwen.ps1")
-Register-ProRunLongTask -Name "ProRun Daemon" -Script (Join-Path $Root "runtime\start-prorun.ps1")
+Register-PreActiveLongTask -Name "PreActive Qwen Endpoint" -Script (Join-Path $Root "runtime\start-qwen.ps1")
+Register-PreActiveLongTask -Name "PreActive Daemon" -Script (Join-Path $Root "runtime\start-pre-active.ps1")
 
 $watchScript = Join-Path $Root "runtime\watchdog.ps1"
 $watchArguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $watchScript + '"'
 $watchAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $watchArguments
 $watchTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
 $watchSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName "ProRun Watchdog" -Action $watchAction -Trigger $watchTrigger -Principal $principal -Settings $watchSettings -Force | Out-Null
+Register-ScheduledTask -TaskName "PreActive Watchdog" -Action $watchAction -Trigger $watchTrigger -Principal $principal -Settings $watchSettings -Force | Out-Null
 
-Start-ScheduledTask -TaskName "ProRun Qwen Endpoint"
-Start-ScheduledTask -TaskName "ProRun Daemon"
-Start-ScheduledTask -TaskName "ProRun Watchdog"
+Start-ScheduledTask -TaskName "PreActive Qwen Endpoint"
+Start-ScheduledTask -TaskName "PreActive Daemon"
+Start-ScheduledTask -TaskName "PreActive Watchdog"

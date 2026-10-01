@@ -1,8 +1,8 @@
 # Donor Architecture Bindings
 
-Pro-Run is self-contained. The repositories below informed its design but are not runtime dependencies, submodules, imports, or automatic authorities.
+Pre-Active is self-contained. The repositories below informed its design but are not runtime dependencies, submodules, imports, or automatic authorities.
 
-| Donor | Mechanism admitted into Pro-Run | Representative source surface inspected |
+| Donor | Mechanism admitted into Pre-Active | Representative source surface inspected |
 |---|---|---|
 | `thebrazenbeard/project-runner` | durable work orchestration, leases, deduplication, exact-subject discipline, bounded retries, ambiguous-write reconciliation | `docs/superpowers/specs/2026-09-17-project-runner-design.md`, `runner/durable_dispatch.py` |
 | `thebrazenbeard/wip` | crash-recovery/checkpoint lifecycle and explicit effect recovery as a distinct phase | `protocol/WIP_PROTOCOL.md`, `protocol/CHECKPOINT_PROTOCOL.md`, `protocol/EFFECT_PROTOCOL.md`, `protocol/RECOVERY_PROTOCOL.md` |
@@ -19,4 +19,4 @@ Secondary portfolio influences include public work on incident handling, provena
 
 ## Admission rule
 
-A donor mechanism enters Pro-Run only when it solves a Pro-Run invariant directly. Domain-specific identity, cognition, product, research, and application logic stays out. This keeps the repository an execution substrate rather than a federation of unrelated projects.
+A donor mechanism enters Pre-Active only when it solves a Pre-Active invariant directly. Domain-specific identity, cognition, product, research, and application logic stays out. This keeps the repository an execution substrate rather than a federation of unrelated projects.

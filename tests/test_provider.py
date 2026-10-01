@@ -1,6 +1,6 @@
 import json
 
-from prorun.providers.openai_compatible import OpenAICompatibleAdapter
+from pre_active.providers.openai_compatible import OpenAICompatibleAdapter
 
 
 def test_provider_parses_single_structured_tool_call() -> None:

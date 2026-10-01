@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from prorun.context import ContextAssembler
-from prorun.engine import Engine, ModelResponse, ToolCall
-from prorun.store import Store
-from prorun.tools import ToolRegistry, ToolSpec
+from pre_active.context import ContextAssembler
+from pre_active.engine import Engine, ModelResponse, ToolCall
+from pre_active.store import Store
+from pre_active.tools import ToolRegistry, ToolSpec
 
 
 class ScriptedModel:

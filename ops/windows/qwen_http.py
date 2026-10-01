@@ -10,10 +10,10 @@ from transformers import AutoTokenizer, BitsAndBytesConfig, Qwen3_5ForCausalLM
 from tool_protocol import ToolProtocolError, parse_qwen_response, to_openai_message
 
 
-MODEL_PATH = os.environ["PRO_RUN_MODEL_PATH"]
-MODEL_ID = os.getenv("PRO_RUN_MODEL_ID", "qwen3.5-4b-local")
-HOST = os.getenv("PRO_RUN_MODEL_HOST", "127.0.0.1")
-PORT = int(os.getenv("PRO_RUN_MODEL_PORT", "18081"))
+MODEL_PATH = os.environ["PRE_ACTIVE_MODEL_PATH"]
+MODEL_ID = os.getenv("PRE_ACTIVE_MODEL_ID", "qwen3.5-4b-local")
+HOST = os.getenv("PRE_ACTIVE_MODEL_HOST", "127.0.0.1")
+PORT = int(os.getenv("PRE_ACTIVE_MODEL_PORT", "18081"))
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
 quantization = BitsAndBytesConfig(
