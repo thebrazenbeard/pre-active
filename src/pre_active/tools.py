@@ -504,6 +504,7 @@ class ToolRegistry:
         evidence_digest: str,
         now: float,
         result: dict[str, Any] | None = None,
+        attempt_quiesced: bool = False,
     ) -> None:
         if len(evidence_digest) != 64 or any(
             ch not in "0123456789abcdefABCDEF" for ch in evidence_digest
@@ -517,6 +518,15 @@ class ToolRegistry:
         if row["state"] not in {"EXECUTING", "ATTEMPTED_UNKNOWN"}:
             raise ToolError(
                 f"mutation request {request_id} cannot be reconciled from state {row['state']}"
+            )
+        if (
+            not effect_occurred
+            and row["state"] == "EXECUTING"
+            and not attempt_quiesced
+        ):
+            raise ValueError(
+                "no-effect reconciliation from EXECUTING requires "
+                "attempt_quiesced=True"
             )
         if effect_occurred and result is None:
             raise ValueError("result is required when reconciliation confirms the effect")
@@ -532,6 +542,15 @@ class ToolRegistry:
             ).fetchone()
             if current is None or current["state"] not in {"EXECUTING", "ATTEMPTED_UNKNOWN"}:
                 raise ToolError("mutation state changed during reconciliation")
+            if (
+                not effect_occurred
+                and current["state"] == "EXECUTING"
+                and not attempt_quiesced
+            ):
+                raise ValueError(
+                    "no-effect reconciliation from EXECUTING requires "
+                    "attempt_quiesced=True"
+                )
             self.store.connection.execute(
                 """
                 INSERT INTO tool_reconciliations (
