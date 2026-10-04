@@ -445,6 +445,12 @@ class Engine:
 
                 def mutation_admission_guard() -> None:
                     heartbeat.assert_owned()
+                    self.store.assert_active_claim(
+                        event.id,
+                        worker_id=self.worker_id,
+                        lease_token=event.lease_token or "",
+                        now=heartbeat.current_time(),
+                    )
                     refreshed = self.store.get_run(run_id)
                     if (
                         refreshed["status"] == "RUNNING"
