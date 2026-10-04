@@ -306,3 +306,97 @@ def test_no_effect_reconciliation_of_executing_attempt_requires_quiescence(
         attempt_quiesced=True,
     )
     assert registry.effect_state("still-executing") == "RECONCILED_NO_EFFECT"
+
+
+
+def test_concurrent_store_openers_serialize_legacy_schema_migration(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state = tmp_path / "legacy.db"
+    original_connect = sqlite3.connect
+    bootstrap = original_connect(state, timeout=5.0, isolation_level=None)
+    bootstrap.execute("PRAGMA journal_mode=WAL")
+    bootstrap.executescript(
+        """
+        CREATE TABLE events (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            dedup_key TEXT UNIQUE,
+            status TEXT NOT NULL,
+            available_at REAL NOT NULL,
+            lease_owner TEXT,
+            lease_until REAL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE TABLE runs (
+            id TEXT PRIMARY KEY,
+            task TEXT NOT NULL,
+            status TEXT NOT NULL,
+            capabilities_json TEXT NOT NULL,
+            step_count INTEGER NOT NULL DEFAULT 0,
+            final_text TEXT,
+            last_error TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        """
+    )
+    bootstrap.close()
+
+    barrier = threading.Barrier(2)
+
+    class BarrierConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=(), /):  # type: ignore[no-untyped-def]
+            cursor = super().execute(sql, parameters)
+            if sql.strip().lower() == "pragma table_info(events)":
+                barrier.wait(timeout=3.0)
+            return cursor
+
+    def connect(*args, **kwargs):  # type: ignore[no-untyped-def]
+        kwargs["factory"] = BarrierConnection
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr("pre_active.store.sqlite3.connect", connect)
+    errors: list[BaseException] = []
+
+    def opener() -> None:
+        try:
+            Store(state).close()
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=opener) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=6.0)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+
+    verify = original_connect(state)
+    try:
+        event_columns = {
+            row[1] for row in verify.execute("PRAGMA table_info(events)").fetchall()
+        }
+        run_columns = {
+            row[1] for row in verify.execute("PRAGMA table_info(runs)").fetchall()
+        }
+    finally:
+        verify.close()
+    assert {"lease_token", "last_error", "dead_lettered_at"} <= event_columns
+    assert {
+        "blocked_request_id",
+        "source_event_id",
+        "failed_event_id",
+        "control_action",
+        "control_reason",
+        "control_requested_at",
+        "paused_event_id",
+        "paused_at",
+        "cancelled_at",
+    } <= run_columns
