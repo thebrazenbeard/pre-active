@@ -97,9 +97,12 @@ class LeaseHeartbeat:
         if time.monotonic() - self._started_monotonic >= self.max_extension_seconds:
             self._lose("maximum lease extension elapsed")
             return
-        elapsed = time.monotonic() - self._started_monotonic
         now = self.current_time()
-        lease_until = now + self.lease_seconds
+        extension_deadline = self.claimed_at + self.max_extension_seconds
+        lease_until = min(now + self.lease_seconds, extension_deadline)
+        if lease_until <= now:
+            self._lose("maximum lease extension elapsed")
+            return
         try:
             cursor = connection.execute(
                 """
