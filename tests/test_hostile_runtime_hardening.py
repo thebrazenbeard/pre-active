@@ -195,3 +195,69 @@ def test_mutation_effect_admission_serializes_with_operator_control(tmp_path: Pa
     assert result.output == {"written": 7}
     assert operator_observed_effect
     assert operator_observed_effect[0] in {"EXECUTING", "COMMITTED"}
+
+
+
+def test_engine_mutation_admission_guard_rechecks_database_claim(tmp_path: Path) -> None:
+    from pre_active.engine import LeaseLost, ModelResponse, ToolCall
+    from pre_active.tools import ToolExecution
+
+    store = Store(tmp_path / "state.db")
+
+    class ExpiringRegistry(ToolRegistry):
+        def execute(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.store.connection.execute(
+                "UPDATE events SET lease_until=0 WHERE status='CLAIMED'"
+            )
+            guard = kwargs.get("admission_guard")
+            assert guard is not None
+            guard()
+            raise AssertionError("expired claim reached mutation admission")
+
+    registry = ExpiringRegistry(store)
+    registry.register(
+        ToolSpec(
+            name="record.write",
+            description="write one value",
+            input_schema={
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            capability="write",
+            mutation=True,
+        ),
+        lambda args: {"written": args["value"]},
+    )
+
+    class WriteModel:
+        def respond(self, *, messages, tools):  # type: ignore[no-untyped-def]
+            return ModelResponse(
+                tool_call=ToolCall(
+                    request_id="lease-fenced-admission",
+                    name="record.write",
+                    arguments={"value": 9},
+                )
+            )
+
+    engine = Engine(
+        store=store,
+        model=WriteModel(),
+        tools=registry,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-a",
+        lease_seconds=30.0,
+        lease_heartbeat_seconds=29.0,
+    )
+    engine.submit_task("write safely", {"write"}, now=1.0)
+
+    with pytest.raises(LeaseLost):
+        engine.run_once(now=2.0)
+
+    row = store.connection.execute(
+        "SELECT state FROM tool_effects WHERE request_id=?",
+        ("lease-fenced-admission",),
+    ).fetchone()
+    assert row is None
