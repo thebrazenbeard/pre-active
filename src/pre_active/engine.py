@@ -443,6 +443,15 @@ class Engine:
                     ) is not None:
                         raise RunControlApplied()
 
+                def mutation_admission_guard() -> None:
+                    heartbeat.assert_owned()
+                    refreshed = self.store.get_run(run_id)
+                    if (
+                        refreshed["status"] == "RUNNING"
+                        and refreshed["control_action"] in {"PAUSE", "CANCEL"}
+                    ):
+                        raise RunControlApplied()
+
                 try:
                     result = self.tools.execute(
                         name=call.name,
@@ -451,9 +460,20 @@ class Engine:
                         allowed_capabilities=run["capabilities"],
                         now=now,
                         before_dispatch=before_tool_dispatch,
+                        admission_guard=mutation_admission_guard,
                     )
                     heartbeat.assert_owned()
                 except RunControlApplied:
+                    refreshed = self.store.get_run(run_id)
+                    if (
+                        refreshed["status"] == "RUNNING"
+                        and refreshed["control_action"] in {"PAUSE", "CANCEL"}
+                    ):
+                        self._apply_pending_control(
+                            event=event,
+                            run_id=run_id,
+                            heartbeat=heartbeat,
+                        )
                     return run_id
                 except BaseException as exc:
                     effect_state = self.tools.effect_state(call.request_id)
@@ -576,7 +596,6 @@ class Engine:
         except RetryableModelError as exc:
             error = f"{type(exc).__name__}: {exc}"
             transition_now = heartbeat.current_time()
-            self.store.update_run(run_id, now=transition_now, last_error=error)
             retry_delay = _model_retry_delay_seconds(
                 event_id=event.id,
                 attempts=event.attempts,
@@ -642,12 +661,10 @@ class Engine:
             return run_id
         except EventLeaseLost as exc:
             raise LeaseLost(str(exc)) from exc
-        except LeaseLost as exc:
-            self.store.update_run(run_id, now=now, last_error=f"{type(exc).__name__}: {exc}")
+        except LeaseLost:
             raise
         except BaseException as exc:
             error = f"{type(exc).__name__}: {exc}"
-            self.store.update_run(run_id, now=now, last_error=error)
             transition_now = heartbeat.current_time()
             self.store.fail_event(
                 event.id,
