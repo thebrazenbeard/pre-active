@@ -261,3 +261,48 @@ def test_engine_mutation_admission_guard_rechecks_database_claim(tmp_path: Path)
         ("lease-fenced-admission",),
     ).fetchone()
     assert row is None
+
+
+
+def test_no_effect_reconciliation_of_executing_attempt_requires_quiescence(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    registry = ToolRegistry(store)
+    request_json = '{"arguments":{"value":1},"tool":"record.write"}'
+    import hashlib
+
+    request_sha = hashlib.sha256(request_json.encode("utf-8")).hexdigest()
+    store.connection.execute(
+        """
+        INSERT INTO tool_effects (
+            request_id, tool_name, request_sha256, request_json, state,
+            result_json, result_sha256, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'EXECUTING', NULL, NULL, ?, ?)
+        """,
+        (
+            "still-executing",
+            "record.write",
+            request_sha,
+            request_json,
+            1.0,
+            1.0,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="quiesced"):
+        registry.reconcile(
+            request_id="still-executing",
+            effect_occurred=False,
+            evidence_digest="d" * 64,
+            now=2.0,
+        )
+
+    registry.reconcile(
+        request_id="still-executing",
+        effect_occurred=False,
+        evidence_digest="e" * 64,
+        now=3.0,
+        attempt_quiesced=True,
+    )
+    assert registry.effect_state("still-executing") == "RECONCILED_NO_EFFECT"
