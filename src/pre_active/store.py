@@ -880,6 +880,21 @@ class Store:
             raise EventLeaseLost("event progress commit lost lease ownership")
         return float(row["lease_until"])
 
+    def assert_active_claim(
+        self,
+        event_id: str,
+        *,
+        worker_id: str,
+        lease_token: str,
+        now: float,
+    ) -> None:
+        self._require_active_claim(
+            event_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            now=now,
+        )
+
     @contextmanager
     def active_claim_transaction(
         self,
