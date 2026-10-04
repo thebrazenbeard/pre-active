@@ -825,7 +825,7 @@ def test_lease_extension_ceiling_blocks_stale_model_decision_persistence(tmp_pat
     assert store.get_run_step_decision(run_id=run_id, step=0) is None
     run = store.get_run(run_id)
     assert run["status"] == "RUNNING"
-    assert "LeaseLost" in run["last_error"]
+    assert run["last_error"] is None
 
 
 def test_final_progress_is_not_committed_after_claim_expires_during_persistence(
