@@ -905,6 +905,13 @@ class Store:
                 now=started_at,
             )
             yield started_at
+            commit_at = current_time()
+            self._require_active_claim(
+                event_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                now=commit_at,
+            )
             if validate is not None:
                 validate()
             self.connection.execute("COMMIT")
@@ -1307,6 +1314,19 @@ class Store:
                     },
                     now=now,
                 )
+                if failed_run_id is not None:
+                    run_cursor = self.connection.execute(
+                        """
+                        UPDATE runs
+                        SET last_error=?, updated_at=?
+                        WHERE id=? AND status='RUNNING'
+                        """,
+                        (error, now, failed_run_id),
+                    )
+                    if run_cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "retry run error update requires one RUNNING run"
+                        )
             self.connection.execute("COMMIT")
         except BaseException:
             self.connection.execute("ROLLBACK")
