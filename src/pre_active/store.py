@@ -867,10 +867,10 @@ class Store:
         worker_id: str,
         lease_token: str,
         now: float,
-    ) -> None:
+    ) -> float:
         row = self.connection.execute(
             """
-            SELECT 1 FROM events
+            SELECT lease_until FROM events
             WHERE id=? AND status='CLAIMED' AND lease_owner=? AND lease_token=?
               AND lease_until IS NOT NULL AND lease_until > ?
             """,
@@ -878,6 +878,7 @@ class Store:
         ).fetchone()
         if row is None:
             raise EventLeaseLost("event progress commit lost lease ownership")
+        return float(row["lease_until"])
 
     @contextmanager
     def active_claim_transaction(
@@ -898,7 +899,7 @@ class Store:
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             started_at = current_time()
-            self._require_active_claim(
+            lease_deadline = self._require_active_claim(
                 event_id,
                 worker_id=worker_id,
                 lease_token=lease_token,
@@ -906,12 +907,10 @@ class Store:
             )
             yield started_at
             commit_at = current_time()
-            self._require_active_claim(
-                event_id,
-                worker_id=worker_id,
-                lease_token=lease_token,
-                now=commit_at,
-            )
+            if commit_at >= lease_deadline:
+                raise EventLeaseLost(
+                    "event progress commit crossed its admitted lease deadline"
+                )
             if validate is not None:
                 validate()
             self.connection.execute("COMMIT")
