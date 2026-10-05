@@ -38,34 +38,49 @@ def _submit(store: Store, task: str, capabilities: set[str], now: float) -> str:
 
 
 def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
-    try:
-        target = resolve_model_target(
+    if args.base_url or args.model:
+        try:
+            target = resolve_model_target(
+                store=store,
+                target_name=None,
+                base_url=args.base_url,
+                model=args.model,
+                api_key_env=args.api_key_env,
+                env=os.environ,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        api_key = os.getenv(target.api_key_env) if target.api_key_env else None
+        model = OpenAICompatibleAdapter(
+            base_url=target.base_url,
+            model=target.model,
+            api_key=api_key,
+            timeout_seconds=args.timeout,
+        )
+        store.append_journal(
+            event_type="MODEL_TARGET_BOUND",
+            subject_id=target.name,
+            payload={
+                "provider": target.provider,
+                "base_url": target.base_url,
+                "model": target.model,
+            },
+            now=time.time(),
+        )
+    else:
+        dynamic_model = TargetResolvingModelAdapter(
             store=store,
             target_name=args.target,
-            base_url=args.base_url,
-            model=args.model,
             api_key_env=args.api_key_env,
             env=os.environ,
+            timeout_seconds=args.timeout,
         )
-    except (ValueError, KeyError) as exc:
-        raise SystemExit(str(exc)) from exc
-    api_key = os.getenv(target.api_key_env) if target.api_key_env else None
-    model = OpenAICompatibleAdapter(
-        base_url=target.base_url,
-        model=target.model,
-        api_key=api_key,
-        timeout_seconds=args.timeout,
-    )
-    store.append_journal(
-        event_type="MODEL_TARGET_BOUND",
-        subject_id=target.name,
-        payload={
-            "provider": target.provider,
-            "base_url": target.base_url,
-            "model": target.model,
-        },
-        now=time.time(),
-    )
+        try:
+            dynamic_model.current_target()
+        except (ValueError, KeyError) as exc:
+            raise SystemExit(str(exc)) from exc
+        model = dynamic_model
+
     tools = ToolRegistry(store)
     engine = Engine(
         store=store,
@@ -82,7 +97,11 @@ def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
         max_autonomous_turns_per_run=args.max_autonomous_turns_per_run,
         max_consecutive_endogenous_turns=args.max_consecutive_endogenous_turns,
     )
-    return Daemon(scheduler=Scheduler(store), engine=engine)
+    return Daemon(
+        scheduler=Scheduler(store),
+        observers=ObserverManager(store),
+        engine=engine,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -122,6 +141,44 @@ def build_parser() -> argparse.ArgumentParser:
     autonomous.add_argument("--reason", required=True)
     autonomous.add_argument("--after", type=float, default=0.0, help="delay in seconds")
     autonomous.add_argument("--capability", action="append", default=[])
+
+    observer = sub.add_parser(
+        "observer",
+        help="configure read-only observation sources that can grant autonomous turns",
+    )
+    observer_sub = observer.add_subparsers(dest="observer_command", required=True)
+
+    observer_add_file = observer_sub.add_parser(
+        "add-file",
+        help="watch one exact local file for snapshot changes",
+    )
+    observer_add_file.add_argument("name")
+    observer_add_file.add_argument("path")
+    observer_add_file.add_argument("task")
+    observer_add_file.add_argument("--every", type=float, required=True)
+    observer_add_file.add_argument("--priority", type=int, default=-10)
+    observer_add_file.add_argument("--emit-initial", action="store_true")
+    observer_add_file.add_argument("--capability", action="append", default=[])
+
+    observer_sub.add_parser("list", help="list configured observers")
+
+    observer_show = observer_sub.add_parser("show", help="show one observer")
+    observer_show.add_argument("name")
+
+    observer_enable = observer_sub.add_parser("enable", help="enable one observer")
+    observer_enable.add_argument("name")
+
+    observer_disable = observer_sub.add_parser("disable", help="disable one observer")
+    observer_disable.add_argument("name")
+
+    observer_remove = observer_sub.add_parser("remove", help="remove one observer")
+    observer_remove.add_argument("name")
+
+    observer_probe = observer_sub.add_parser(
+        "probe",
+        help="sample one observer without mutating its baseline or emitting a turn",
+    )
+    observer_probe.add_argument("name")
 
     target = sub.add_parser("target", help="configure the local model target")
     target_sub = target.add_subparsers(dest="target_command", required=True)
@@ -321,6 +378,59 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.command == "observer":
+            observers = ObserverManager(store)
+            if args.observer_command == "add-file":
+                observer_id = observers.add_file(
+                    name=args.name,
+                    path=args.path,
+                    task=args.task,
+                    capabilities=set(args.capability),
+                    every_seconds=args.every,
+                    priority=args.priority,
+                    emit_initial=args.emit_initial,
+                    now=now,
+                )
+                print(
+                    json.dumps(
+                        observers.get(args.name) | {"id": observer_id},
+                        sort_keys=True,
+                    )
+                )
+                return 0
+            if args.observer_command == "list":
+                print(json.dumps({"observers": observers.list()}, sort_keys=True))
+                return 0
+            if args.observer_command == "show":
+                print(json.dumps(observers.get(args.name), sort_keys=True))
+                return 0
+            if args.observer_command in {"enable", "disable"}:
+                observers.set_enabled(
+                    args.name,
+                    enabled=args.observer_command == "enable",
+                    now=now,
+                )
+                print(json.dumps(observers.get(args.name), sort_keys=True))
+                return 0
+            if args.observer_command == "remove":
+                observers.remove(args.name, now=now)
+                print(json.dumps({"name": args.name, "removed": True}, sort_keys=True))
+                return 0
+            if args.observer_command == "probe":
+                observation = observers.probe(args.name)
+                print(
+                    json.dumps(
+                        {
+                            "name": args.name,
+                            "digest": observation.digest,
+                            "summary": observation.summary,
+                            "evidence": observation.evidence,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 0
+            raise AssertionError(args.observer_command)
         if args.command == "contract":
             if args.contract_command == "show":
                 run = store.get_run(args.run_id)
@@ -490,6 +600,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             snapshot = store.operational_snapshot(now=now)
             snapshot["model_target"] = store.get_active_model_target()
             snapshot["runtime_contract_version"] = RUN_CONTRACT_VERSION
+            snapshot["observers"] = ObserverManager(store).snapshot(now=now)
             print(json.dumps(snapshot, sort_keys=True))
             return 0
         if args.command == "dead":
@@ -563,7 +674,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         runtime = _runtime(args, store)
         if args.command == "run-once":
             result = runtime.cycle(now=now)
-            print(json.dumps({"emitted_events": result.emitted_events, "run_id": result.run_id}, sort_keys=True))
+            print(
+                json.dumps(
+                    {
+                        "emitted_events": result.emitted_events,
+                        "observer_samples": result.observer_samples,
+                        "observer_events": result.observer_events,
+                        "observer_errors": result.observer_errors,
+                        "schedule_events": result.schedule_events,
+                        "run_id": result.run_id,
+                    },
+                    sort_keys=True,
+                )
+            )
             return 0
         if args.command == "daemon":
             runtime.run_forever(poll_seconds=args.poll_seconds)
