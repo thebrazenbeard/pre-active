@@ -5,17 +5,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$python = Join-Path $Root "python\python.exe"
+$source = Join-Path $Root "source"
+$state = Join-Path $Root "state\state.db"
+$watchScript = Join-Path $Root "runtime\watchdog.ps1"
+
 $required = @(
-    (Join-Path $Root "python\python.exe"),
-    (Join-Path $Root "source\src"),
-    (Join-Path $Root "runtime\start-pre-active.ps1"),
-    (Join-Path $Root "runtime\watchdog.ps1")
+    $python,
+    (Join-Path $source "src"),
+    $watchScript
 )
 if ($RegisterBundledQwenHost) {
     $required += @(
         (Join-Path $Root "model-env\Lib\site-packages"),
         (Join-Path $Root "runtime\qwen_http.py"),
-        (Join-Path $Root "runtime\start-qwen.ps1"),
         (Join-Path $Root "runtime\model-path.txt")
     )
 }
@@ -27,26 +30,32 @@ foreach ($path in $required) {
 
 New-Item -ItemType Directory -Force -Path (Join-Path $Root "state"), (Join-Path $Root "logs") | Out-Null
 
+& $python -m pip install --disable-pip-version-check --no-deps --no-build-isolation -e $source
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to bind Pre-Active source into pinned Python"
+}
+
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 $boot = New-ScheduledTaskTrigger -AtStartup
 $longSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 
-function Register-PreActiveLongTask {
-    param(
-        [string]$Name,
-        [string]$Script
-    )
-    $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $Script + '"'
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
-    Register-ScheduledTask -TaskName $Name -Action $action -Trigger $boot -Principal $principal -Settings $longSettings -Force | Out-Null
-}
+$daemonArgs = '-m pre_active --state "' + $state + '" daemon --poll-seconds 1 --timeout 180'
+$daemonAction = New-ScheduledTaskAction -Execute $python -Argument $daemonArgs -WorkingDirectory $source
+Register-ScheduledTask -TaskName "PreActive Daemon" -Action $daemonAction -Trigger $boot -Principal $principal -Settings $longSettings -Force | Out-Null
 
-Register-PreActiveLongTask -Name "PreActive Daemon" -Script (Join-Path $Root "runtime\start-pre-active.ps1")
 if ($RegisterBundledQwenHost) {
-    Register-PreActiveLongTask -Name "PreActive Qwen Endpoint" -Script (Join-Path $Root "runtime\start-qwen.ps1")
+    $qwenScript = Join-Path $Root "runtime\qwen_http.py"
+    $qwenArgs = '"' + $qwenScript + '"'
+    $qwenAction = New-ScheduledTaskAction -Execute $python -Argument $qwenArgs -WorkingDirectory (Join-Path $Root "runtime")
+    Register-ScheduledTask -TaskName "PreActive Qwen Endpoint" -Action $qwenAction -Trigger $boot -Principal $principal -Settings $longSettings -Force | Out-Null
+} else {
+    $existingQwen = Get-ScheduledTask -TaskName "PreActive Qwen Endpoint" -ErrorAction SilentlyContinue
+    if ($existingQwen) {
+        Stop-ScheduledTask -TaskName "PreActive Qwen Endpoint" -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName "PreActive Qwen Endpoint" -Confirm:$false
+    }
 }
 
-$watchScript = Join-Path $Root "runtime\watchdog.ps1"
 $watchArguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $watchScript + '"'
 $watchAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $watchArguments
 $watchTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
