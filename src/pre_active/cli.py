@@ -9,6 +9,7 @@ import time
 from typing import Sequence
 
 from .context import ContextAssembler
+from .contracts import RUN_CONTRACT_VERSION
 from .daemon import Daemon
 from .engine import Engine
 from .model_targets import (
@@ -199,6 +200,20 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint_reject.add_argument("--verifier", required=True)
     checkpoint_reject.add_argument("--reason", required=True)
 
+    contract = sub.add_parser(
+        "contract",
+        help="inspect durable run/runtime contract affinity",
+    )
+    contract_sub = contract.add_subparsers(
+        dest="contract_command",
+        required=True,
+    )
+    contract_show = contract_sub.add_parser(
+        "show",
+        help="show one run's contract compatibility",
+    )
+    contract_show.add_argument("run_id")
+
     memory = sub.add_parser("remember", help="add durable context memory")
     memory.add_argument("content")
     memory.add_argument("--kind", default="semantic")
@@ -306,6 +321,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.command == "contract":
+            if args.contract_command == "show":
+                run = store.get_run(args.run_id)
+                print(
+                    json.dumps(
+                        {
+                            "run_id": args.run_id,
+                            "status": run["status"],
+                            "run_contract_version": run["contract_version"],
+                            "runtime_contract_version": RUN_CONTRACT_VERSION,
+                            "compatible": (
+                                run["contract_version"] == RUN_CONTRACT_VERSION
+                            ),
+                            "blocked_event_id": run["contract_event_id"],
+                            "resume_status": run["contract_resume_status"],
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 0
+            raise AssertionError(args.contract_command)
         if args.command == "checkpoint":
             ledger = ProgressLedger(store)
             if args.checkpoint_command == "add":
@@ -453,6 +489,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "status":
             snapshot = store.operational_snapshot(now=now)
             snapshot["model_target"] = store.get_active_model_target()
+            snapshot["runtime_contract_version"] = RUN_CONTRACT_VERSION
             print(json.dumps(snapshot, sort_keys=True))
             return 0
         if args.command == "dead":
