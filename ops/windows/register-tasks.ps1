@@ -30,7 +30,13 @@ foreach ($path in $required) {
 
 New-Item -ItemType Directory -Force -Path (Join-Path $Root "state"), (Join-Path $Root "logs") | Out-Null
 
-& $python -m pip install --disable-pip-version-check --no-deps --no-build-isolation -e $source
+$sitePackages = Join-Path $Root "python\Lib\site-packages"
+if (-not (Test-Path $sitePackages)) {
+    throw "Pinned Python site-packages missing: $sitePackages"
+}
+$sourceBinding = Join-Path $sitePackages "pre_active_source.pth"
+Set-Content -Path $sourceBinding -Value (Join-Path $source "src") -Encoding Ascii
+& $python -c "import pathlib, pre_active; print(pathlib.Path(pre_active.__file__).resolve())"
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to bind Pre-Active source into pinned Python"
 }
