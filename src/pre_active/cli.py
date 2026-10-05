@@ -11,6 +11,12 @@ from typing import Sequence
 from .context import ContextAssembler
 from .daemon import Daemon
 from .engine import Engine
+from .model_targets import (
+    ModelTarget,
+    TargetResolvingModelAdapter,
+    probe_model_target,
+    resolve_model_target,
+)
 from .providers.openai_compatible import OpenAICompatibleAdapter
 from .scheduler import Scheduler
 from .store import Store
@@ -30,16 +36,33 @@ def _submit(store: Store, task: str, capabilities: set[str], now: float) -> str:
 
 
 def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
-    base_url = args.base_url or os.getenv("PRE_ACTIVE_BASE_URL")
-    model_name = args.model or os.getenv("PRE_ACTIVE_MODEL")
-    if not base_url or not model_name:
-        raise SystemExit("run-once/daemon require --base-url and --model (or PRE_ACTIVE_BASE_URL/PRE_ACTIVE_MODEL)")
-    api_key = os.getenv(args.api_key_env) if args.api_key_env else None
+    try:
+        target = resolve_model_target(
+            store=store,
+            target_name=args.target,
+            base_url=args.base_url,
+            model=args.model,
+            api_key_env=args.api_key_env,
+            env=os.environ,
+        )
+    except (ValueError, KeyError) as exc:
+        raise SystemExit(str(exc)) from exc
+    api_key = os.getenv(target.api_key_env) if target.api_key_env else None
     model = OpenAICompatibleAdapter(
-        base_url=base_url,
-        model=model_name,
+        base_url=target.base_url,
+        model=target.model,
         api_key=api_key,
         timeout_seconds=args.timeout,
+    )
+    store.append_journal(
+        event_type="MODEL_TARGET_BOUND",
+        subject_id=target.name,
+        payload={
+            "provider": target.provider,
+            "base_url": target.base_url,
+            "model": target.model,
+        },
+        now=time.time(),
     )
     tools = ToolRegistry(store)
     engine = Engine(
@@ -97,6 +120,32 @@ def build_parser() -> argparse.ArgumentParser:
     autonomous.add_argument("--after", type=float, default=0.0, help="delay in seconds")
     autonomous.add_argument("--capability", action="append", default=[])
 
+    target = sub.add_parser("target", help="configure the local model target")
+    target_sub = target.add_subparsers(dest="target_command", required=True)
+
+    target_set = target_sub.add_parser("set", help="create or update a local model target")
+    target_set.add_argument("name")
+    target_set.add_argument("--provider", default="openai-compatible")
+    target_set.add_argument("--base-url", required=True)
+    target_set.add_argument("--model", required=True)
+    target_set.add_argument("--api-key-env")
+    target_set.add_argument("--activate", action="store_true")
+
+    target_sub.add_parser("list", help="list configured local model targets")
+
+    target_show = target_sub.add_parser("show", help="show one target or the active target")
+    target_show.add_argument("name", nargs="?")
+
+    target_activate = target_sub.add_parser("activate", help="make a target the daemon default")
+    target_activate.add_argument("name")
+
+    target_remove = target_sub.add_parser("remove", help="remove an inactive target")
+    target_remove.add_argument("name")
+
+    target_probe = target_sub.add_parser("probe", help="probe one target or the active target")
+    target_probe.add_argument("name", nargs="?")
+    target_probe.add_argument("--timeout", type=float, default=5.0)
+
     memory = sub.add_parser("remember", help="add durable context memory")
     memory.add_argument("content")
     memory.add_argument("--kind", default="semantic")
@@ -124,8 +173,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name in ("run-once", "daemon"):
         run = sub.add_parser(name, help="execute the continuous runtime")
-        run.add_argument("--base-url")
-        run.add_argument("--model")
+        run.add_argument("--target", help="named persisted local model target")
+        run.add_argument("--base-url", help="one-run local endpoint override")
+        run.add_argument("--model", help="one-run local model-id override")
         run.add_argument("--api-key-env", default="PRE_ACTIVE_API_KEY")
         run.add_argument("--timeout", type=float, default=120.0)
         run.add_argument("--context-chars", type=int, default=12000)
@@ -202,6 +252,76 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.command == "target":
+            if args.target_command == "set":
+                target = ModelTarget(
+                    name=args.name,
+                    provider=args.provider,
+                    base_url=args.base_url,
+                    model=args.model,
+                    api_key_env=args.api_key_env,
+                )
+                store.upsert_model_target(
+                    name=target.name,
+                    provider=target.provider,
+                    base_url=target.base_url,
+                    model=target.model,
+                    api_key_env=target.api_key_env,
+                    activate=args.activate,
+                    now=now,
+                )
+                record = store.get_model_target(target.name)
+                assert record is not None
+                print(json.dumps(record, sort_keys=True))
+                return 0
+            if args.target_command == "list":
+                print(json.dumps({"targets": store.list_model_targets()}, sort_keys=True))
+                return 0
+            if args.target_command == "show":
+                record = (
+                    store.get_model_target(args.name)
+                    if args.name
+                    else store.get_active_model_target()
+                )
+                if record is None:
+                    raise SystemExit("model target not found")
+                print(
+                    json.dumps(
+                        {
+                            "target": record,
+                            "active": store.get_active_model_target(),
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 0
+            if args.target_command == "activate":
+                store.activate_model_target(args.name, now=now)
+                record = store.get_model_target(args.name)
+                assert record is not None
+                print(json.dumps(record, sort_keys=True))
+                return 0
+            if args.target_command == "remove":
+                store.remove_model_target(args.name, now=now)
+                print(json.dumps({"name": args.name, "removed": True}, sort_keys=True))
+                return 0
+            if args.target_command == "probe":
+                record = (
+                    store.get_model_target(args.name)
+                    if args.name
+                    else store.get_active_model_target()
+                )
+                if record is None:
+                    raise SystemExit("model target not found")
+                target = ModelTarget.from_record(record)
+                result = probe_model_target(
+                    target,
+                    env=os.environ,
+                    timeout_seconds=args.timeout,
+                )
+                print(json.dumps(result, sort_keys=True))
+                return 0 if result["ready"] else 2
+            raise AssertionError(args.target_command)
         if args.command == "remember":
             memory_id = store.add_memory(
                 kind=args.kind,
@@ -212,12 +332,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"memory_id": memory_id}, sort_keys=True))
             return 0
         if args.command == "status":
-            print(
-                json.dumps(
-                    store.operational_snapshot(now=now),
-                    sort_keys=True,
-                )
-            )
+            snapshot = store.operational_snapshot(now=now)
+            snapshot["model_target"] = store.get_active_model_target()
+            print(json.dumps(snapshot, sort_keys=True))
             return 0
         if args.command == "dead":
             print(

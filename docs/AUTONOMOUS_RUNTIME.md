@@ -107,6 +107,12 @@ TURN_GRANTED
 
 An autonomous turn receives only the capabilities already attached to its run or explicitly supplied by the host that created a new autonomous run.
 
+## Local cognitive target
+
+The resident runtime and the LLM are separate lifecycle objects. Pre-Active resolves a user-selected local model target from durable state and uses that target whenever cognition is required. Changing the active target does not change run/effect authority and does not redefine Pre-Active itself.
+
+The selected target is currently a loopback OpenAI-compatible endpoint plus model identifier. A bundled Qwen host is one optional way to satisfy that interface; another local model server may be selected instead. Model availability is therefore a dependency state, not the runtime's liveness state.
+
 ## Continuous host lifecycle
 
 The daemon is the resident host loop. Operating-system supervision should keep that process alive across ordinary process failure and reboot.

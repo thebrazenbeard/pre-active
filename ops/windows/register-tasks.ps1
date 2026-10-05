@@ -1,5 +1,6 @@
 param(
-    [string]$Root = "C:\ProgramData\PreActive"
+    [string]$Root = "C:\ProgramData\PreActive",
+    [switch]$RegisterBundledQwenHost
 )
 
 $ErrorActionPreference = "Stop"
@@ -7,13 +8,17 @@ $ErrorActionPreference = "Stop"
 $required = @(
     (Join-Path $Root "python\python.exe"),
     (Join-Path $Root "source\src"),
-    (Join-Path $Root "model-env\Lib\site-packages"),
-    (Join-Path $Root "runtime\qwen_http.py"),
-    (Join-Path $Root "runtime\start-qwen.ps1"),
     (Join-Path $Root "runtime\start-pre-active.ps1"),
-    (Join-Path $Root "runtime\watchdog.ps1"),
-    (Join-Path $Root "runtime\model-path.txt")
+    (Join-Path $Root "runtime\watchdog.ps1")
 )
+if ($RegisterBundledQwenHost) {
+    $required += @(
+        (Join-Path $Root "model-env\Lib\site-packages"),
+        (Join-Path $Root "runtime\qwen_http.py"),
+        (Join-Path $Root "runtime\start-qwen.ps1"),
+        (Join-Path $Root "runtime\model-path.txt")
+    )
+}
 foreach ($path in $required) {
     if (-not (Test-Path $path)) {
         throw "Required runtime path missing: $path"
@@ -36,8 +41,10 @@ function Register-PreActiveLongTask {
     Register-ScheduledTask -TaskName $Name -Action $action -Trigger $boot -Principal $principal -Settings $longSettings -Force | Out-Null
 }
 
-Register-PreActiveLongTask -Name "PreActive Qwen Endpoint" -Script (Join-Path $Root "runtime\start-qwen.ps1")
 Register-PreActiveLongTask -Name "PreActive Daemon" -Script (Join-Path $Root "runtime\start-pre-active.ps1")
+if ($RegisterBundledQwenHost) {
+    Register-PreActiveLongTask -Name "PreActive Qwen Endpoint" -Script (Join-Path $Root "runtime\start-qwen.ps1")
+}
 
 $watchScript = Join-Path $Root "runtime\watchdog.ps1"
 $watchArguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $watchScript + '"'
@@ -46,6 +53,8 @@ $watchTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -Rep
 $watchSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName "PreActive Watchdog" -Action $watchAction -Trigger $watchTrigger -Principal $principal -Settings $watchSettings -Force | Out-Null
 
-Start-ScheduledTask -TaskName "PreActive Qwen Endpoint"
+if ($RegisterBundledQwenHost) {
+    Start-ScheduledTask -TaskName "PreActive Qwen Endpoint"
+}
 Start-ScheduledTask -TaskName "PreActive Daemon"
 Start-ScheduledTask -TaskName "PreActive Watchdog"

@@ -91,6 +91,16 @@ If a PAUSE request is still pending on a `RUNNING` run and has not reached a saf
 
 `pre_active.context.ContextAssembler` applies a strict character budget. It preserves the system instruction and current task before optional durable memory. Memory is selected by simple lexical relevance plus stored salience. V1 deliberately keeps this selection deterministic and inspectable rather than hiding retrieval behind an opaque agent framework.
 
+### Local model target boundary
+
+Pre-Active does not own a specific model identity. The user defines one or more named **local model targets** in durable state and selects one active target. A target records the provider adapter, loopback base URL, model identifier, and (optionally) the name of an environment variable holding a credential. Pre-Active never stores the credential value in target state.
+
+V1 targets are intentionally loopback-only and `openai-compatible`. This makes the runtime portable across local model hosts such as a bundled Qwen shim or another user-operated OpenAI-compatible server without making that host part of Pre-Active's identity.
+
+Runtime resolution order is explicit: one-run `--base-url/--model` override, then named `--target`, then the persisted active target, then legacy `PRE_ACTIVE_BASE_URL`/`PRE_ACTIVE_MODEL` environment fallback. The resident daemon re-resolves a persisted/named target at each model turn, so `target activate <name>` takes effect on the next cognition turn without restarting or rewriting the daemon. An explicit one-run URL/model override remains pinned for that invocation.
+
+The bundled Qwen HTTP shim is an optional local model-host adapter, not the architectural model boundary. The daemon remains resident even when the selected model endpoint is temporarily unavailable; provider retry semantics preserve queued work until cognition becomes available again.
+
 ### Model boundary
 
 The core depends only on the `ModelAdapter` protocol. `OpenAICompatibleAdapter` is a minimal implementation for chat-completions-compatible endpoints.

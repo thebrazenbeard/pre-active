@@ -86,6 +86,18 @@ CREATE TABLE IF NOT EXISTS schedules (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS model_targets (
+    name TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    model TEXT NOT NULL,
+    api_key_env TEXT,
+    is_active INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS model_targets_one_active_idx
+ON model_targets(is_active) WHERE is_active=1;
 CREATE TABLE IF NOT EXISTS journal (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
@@ -1382,6 +1394,204 @@ class Store:
             (run_id, limit),
         ).fetchall()
         return [{"role": str(r["role"]), "content": str(r["content"])} for r in reversed(rows)]
+
+    def upsert_model_target(
+        self,
+        *,
+        name: str,
+        provider: str,
+        base_url: str,
+        model: str,
+        api_key_env: str | None,
+        activate: bool,
+        now: float,
+    ) -> None:
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ValueError("model target name is required")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.connection.execute(
+                "SELECT created_at, is_active FROM model_targets WHERE name=?",
+                (normalized_name,),
+            ).fetchone()
+            created_at = now if existing is None else float(existing["created_at"])
+            active_value = (
+                1
+                if activate
+                else (int(existing["is_active"]) if existing is not None else 0)
+            )
+            if activate:
+                self.connection.execute(
+                    "UPDATE model_targets SET is_active=0, updated_at=? WHERE is_active=1",
+                    (now,),
+                )
+            self.connection.execute(
+                """
+                INSERT INTO model_targets
+                    (name, provider, base_url, model, api_key_env, is_active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    provider=excluded.provider,
+                    base_url=excluded.base_url,
+                    model=excluded.model,
+                    api_key_env=excluded.api_key_env,
+                    is_active=excluded.is_active,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    normalized_name,
+                    provider,
+                    base_url,
+                    model,
+                    api_key_env,
+                    active_value,
+                    created_at,
+                    now,
+                ),
+            )
+            self.append_journal(
+                event_type="MODEL_TARGET_CONFIGURED",
+                subject_id=normalized_name,
+                payload={
+                    "provider": provider,
+                    "base_url": base_url,
+                    "model": model,
+                    "api_key_env": api_key_env,
+                    "active": bool(active_value),
+                },
+                now=now,
+            )
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+
+    def list_model_targets(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT name, provider, base_url, model, api_key_env, is_active,
+                   created_at, updated_at
+            FROM model_targets
+            ORDER BY name ASC
+            """
+        ).fetchall()
+        return [
+            {
+                "name": str(row["name"]),
+                "provider": str(row["provider"]),
+                "base_url": str(row["base_url"]),
+                "model": str(row["model"]),
+                "api_key_env": row["api_key_env"],
+                "active": bool(row["is_active"]),
+                "created_at": float(row["created_at"]),
+                "updated_at": float(row["updated_at"]),
+            }
+            for row in rows
+        ]
+
+    def get_model_target(self, name: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT name, provider, base_url, model, api_key_env, is_active,
+                   created_at, updated_at
+            FROM model_targets WHERE name=?
+            """,
+            (name,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "name": str(row["name"]),
+            "provider": str(row["provider"]),
+            "base_url": str(row["base_url"]),
+            "model": str(row["model"]),
+            "api_key_env": row["api_key_env"],
+            "active": bool(row["is_active"]),
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    def get_active_model_target(self) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT name, provider, base_url, model, api_key_env, is_active,
+                   created_at, updated_at
+            FROM model_targets WHERE is_active=1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "name": str(row["name"]),
+            "provider": str(row["provider"]),
+            "base_url": str(row["base_url"]),
+            "model": str(row["model"]),
+            "api_key_env": row["api_key_env"],
+            "active": True,
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    def activate_model_target(self, name: str, *, now: float) -> None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT name FROM model_targets WHERE name=?",
+                (name,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(name)
+            self.connection.execute(
+                "UPDATE model_targets SET is_active=0, updated_at=? WHERE is_active=1",
+                (now,),
+            )
+            cursor = self.connection.execute(
+                """
+                UPDATE model_targets
+                SET is_active=1, updated_at=?
+                WHERE name=?
+                """,
+                (now, name),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("model target activation lost target")
+            self.append_journal(
+                event_type="MODEL_TARGET_ACTIVATED",
+                subject_id=name,
+                payload={},
+                now=now,
+            )
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+
+    def remove_model_target(self, name: str, *, now: float) -> None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT is_active FROM model_targets WHERE name=?",
+                (name,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(name)
+            if bool(row["is_active"]):
+                raise RuntimeError("cannot remove the active model target")
+            self.connection.execute(
+                "DELETE FROM model_targets WHERE name=?",
+                (name,),
+            )
+            self.append_journal(
+                event_type="MODEL_TARGET_REMOVED",
+                subject_id=name,
+                payload={},
+                now=now,
+            )
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
 
     def add_memory(
         self, *, kind: str, content: str, salience: float = 0.5, now: float
