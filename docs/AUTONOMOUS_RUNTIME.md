@@ -89,7 +89,9 @@ A model that can request its own future turns can otherwise create an infinite l
 think -> request another turn -> think -> request another turn -> ...
 ```
 
-Pre-Active therefore applies a durable per-run autonomous-turn budget. Exceeding the configured budget fails the run rather than silently consuming inference forever.
+Pre-Active therefore applies two separate bounds. A durable per-run autonomous-turn budget limits total self-requested cognition across the run, while a smaller consecutive endogenous-depth limit bounds uninterrupted internal dialogue after one external/temporal/open-loop opportunity. Each self-generated `run.step` carries its `endogenous_depth`. Once the consecutive depth is reached, `pre_active.request_turn` is no longer advertised; if a noncompliant model calls it anyway, the run fails closed rather than scheduling another turn.
+
+The default consecutive endogenous depth is 2. This permits a short initiator/critic-style internal dialogue without allowing `think -> think again` to become a resident inference loop.
 
 Future initiative policies may add information-gain, novelty, cooldown, or resource budgets, but another model turn should be justified by expected progress, new evidence, a matured dependency, or an explicitly bounded reconsideration policy.
 

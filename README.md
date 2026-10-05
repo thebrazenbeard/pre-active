@@ -168,6 +168,7 @@ pre-active --state .pre-active/state.db daemon --poll-seconds 1
 # --max-lease-extension-seconds 900
 # --max-event-attempts 16
 # --max-autonomous-turns-per-run 16
+# --max-consecutive-endogenous-turns 2
 ```
 
 For the bundled OpenAI-compatible adapter, network/timeouts and HTTP `408`, `429`, `500`, `502`, `503`, and `504` are treated as retryable provider failures. Other HTTP `4xx` responses and malformed provider protocol/JSON are terminal for that run. Retryable provider failures retain the existing event-attempt ceiling, add deterministic per-event jitter, and honor a valid HTTP `Retry-After` value as a minimum delay.

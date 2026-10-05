@@ -396,3 +396,109 @@ def test_standalone_autonomous_deferral_is_atomic_on_enqueue_failure(
     assert run["status"] == "RUNNING"
     assert run["step_count"] == 0
     assert run["autonomous_turn_count"] == 0
+
+
+def test_endogenous_dialogue_chain_is_bounded_but_can_take_multiple_own_turns(
+    tmp_path: Path,
+) -> None:
+    base = time.time()
+    store = Store(tmp_path / "state.db")
+    registry = ToolRegistry(store)
+
+    class BoundedDialogueModel:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.tool_visibility: list[bool] = []
+
+        def respond(self, *, messages, tools):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            can_reenter = any(
+                tool["name"] == AUTONOMOUS_TURN_TOOL_NAME for tool in tools
+            )
+            self.tool_visibility.append(can_reenter)
+            if can_reenter:
+                return ModelResponse(
+                    tool_call=ToolCall(
+                        request_id=f"dialogue-{self.calls}",
+                        name=AUTONOMOUS_TURN_TOOL_NAME,
+                        arguments={"reason": "continue internal review", "delay_seconds": 0},
+                    )
+                )
+            return ModelResponse(final_text="bounded dialogue complete")
+
+    model = BoundedDialogueModel()
+    engine = Engine(
+        store=store,
+        model=model,
+        tools=registry,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-a",
+        max_autonomous_turns_per_run=10,
+        max_consecutive_endogenous_turns=2,
+    )
+    run_id = engine.submit_task("Review this without looping forever.", set(), now=base)
+
+    assert engine.run_once(now=base + 1) == run_id
+    assert store.get_run(run_id)["status"] == "WAITING"
+    assert engine.run_once(now=base + 2) == run_id
+    assert store.get_run(run_id)["status"] == "WAITING"
+    assert engine.run_once(now=base + 3) == run_id
+
+    run = store.get_run(run_id)
+    assert run["status"] == "COMPLETED"
+    assert run["final_text"] == "bounded dialogue complete"
+    assert run["autonomous_turn_count"] == 2
+    assert model.tool_visibility == [True, True, False]
+
+    endogenous = [
+        item for item in store.list_events(kind="run.step")
+        if item["payload"].get("source") == "ENDOGENOUS"
+    ]
+    assert [item["payload"]["endogenous_depth"] for item in endogenous] == [1, 2]
+
+
+def test_unadvertised_self_turn_after_chain_limit_fails_closed(
+    tmp_path: Path,
+) -> None:
+    base = time.time()
+    store = Store(tmp_path / "state.db")
+    registry = ToolRegistry(store)
+
+    class NoncompliantLoopModel:
+        def respond(self, *, messages, tools):  # type: ignore[no-untyped-def]
+            return ModelResponse(
+                tool_call=ToolCall(
+                    request_id="rogue-loop",
+                    name=AUTONOMOUS_TURN_TOOL_NAME,
+                    arguments={"reason": "ignore the limit", "delay_seconds": 0},
+                )
+            )
+
+    engine = Engine(
+        store=store,
+        model=NoncompliantLoopModel(),
+        tools=registry,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-a",
+        max_autonomous_turns_per_run=10,
+        max_consecutive_endogenous_turns=1,
+    )
+    run_id = engine.submit_task("Fail closed on recursive self-stimulation.", set(), now=base)
+
+    assert engine.run_once(now=base + 1) == run_id
+    assert store.get_run(run_id)["status"] == "WAITING"
+    assert engine.run_once(now=base + 2) == run_id
+
+    run = store.get_run(run_id)
+    assert run["status"] == "FAILED"
+    assert run["last_error"] == "autonomous re-entry chain limit reached"
+    assert run["autonomous_turn_count"] == 1
+    assert store.pending_event_count() == 0
+    denied = [
+        item for item in store.list_journal(subject_id=run_id)
+        if item["event_type"] == "AUTONOMOUS_TURN_DENIED"
+    ]
+    assert denied[-1]["payload"]["reason"] == "endogenous_chain_limit"
+    assert denied[-1]["payload"]["endogenous_depth"] == 1

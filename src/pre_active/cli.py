@@ -78,6 +78,7 @@ def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
         max_event_attempts=args.max_event_attempts,
         max_steps=args.max_steps,
         max_autonomous_turns_per_run=args.max_autonomous_turns_per_run,
+        max_consecutive_endogenous_turns=args.max_consecutive_endogenous_turns,
     )
     return Daemon(scheduler=Scheduler(store), engine=engine)
 
@@ -187,6 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
         run.add_argument("--max-event-attempts", type=int, default=16)
         run.add_argument("--max-steps", type=int, default=24)
         run.add_argument("--max-autonomous-turns-per-run", type=int, default=16)
+        run.add_argument("--max-consecutive-endogenous-turns", type=int, default=2)
         if name == "daemon":
             run.add_argument("--poll-seconds", type=float, default=1.0)
 

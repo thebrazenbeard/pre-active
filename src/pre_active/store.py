@@ -1103,11 +1103,14 @@ class Store:
         delay_seconds: float,
         priority: int,
         now: float,
+        endogenous_depth: int = 1,
     ) -> int:
         if not reason.strip():
             raise ValueError("autonomous turn reason is required")
         if delay_seconds < 0:
             raise ValueError("delay_seconds must be >= 0")
+        if endogenous_depth < 1:
+            raise ValueError("endogenous_depth must be >= 1")
         next_step = int(expected_step) + 1
         owns_transaction = not self.connection.in_transaction
         if owns_transaction:
@@ -1135,6 +1138,7 @@ class Store:
                     "autonomous": True,
                     "source": "ENDOGENOUS",
                     "reason": reason.strip(),
+                    "endogenous_depth": int(endogenous_depth),
                 },
                 priority=priority,
                 dedup_key=f"run-step:{run_id}:{next_step}",
@@ -1149,6 +1153,7 @@ class Store:
                     "reason": reason.strip(),
                     "next_step": next_step,
                     "not_before": now + float(delay_seconds),
+                    "endogenous_depth": int(endogenous_depth),
                 },
                 now=now,
             )
