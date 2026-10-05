@@ -219,3 +219,52 @@ def test_checkpoint_cli_rejects_non_object_evidence(
             "--evidence-json",
             '["list"]',
         ])
+
+
+def test_progress_ledger_constructor_does_not_commit_active_transaction(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    store.connection.execute("BEGIN IMMEDIATE")
+    try:
+        ProgressLedger(store)
+        assert store.connection.in_transaction is True
+    finally:
+        store.connection.execute("ROLLBACK")
+
+
+def test_exact_repeated_verifier_decision_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    run_id = store.create_run(
+        task="Idempotent verifier retry.",
+        capabilities=set(),
+        now=1.0,
+    )
+    ledger = ProgressLedger(store)
+    checkpoint_id = ledger.add_candidate(
+        run_id=run_id,
+        step=0,
+        summary="Candidate",
+        evidence={"check": "passed"},
+        producer="worker",
+        now=2.0,
+    )
+
+    for _ in range(2):
+        ledger.decide(
+            checkpoint_id,
+            decision="VERIFIED",
+            verifier="acceptance-harness",
+            reason="Exact same verification retry.",
+            now=3.0,
+        )
+
+    verified_events = [
+        item
+        for item in store.list_journal(subject_id=run_id)
+        if item["event_type"] == "PROGRESS_VERIFIED"
+    ]
+    assert len(verified_events) == 1
+    assert ledger.get(checkpoint_id)["state"] == "VERIFIED"
