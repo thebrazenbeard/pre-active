@@ -87,6 +87,17 @@ If a PAUSE request is still pending on a `RUNNING` run and has not reached a saf
 
 `max_steps` bounds runaway tool/reasoning cycles. `max_autonomous_turns_per_run` bounds total model-requested future cognition across a run; the default is 16. `max_consecutive_endogenous_turns` separately bounds uninterrupted self-generated dialogue depth; the default is 2. At that depth the reserved re-entry tool is withheld, and an unadvertised attempt to call it fails closed. `max_event_attempts` bounds transient infrastructure retry loops; its default is also 16 attempts.
 
+### Run contract affinity
+
+Every durable run records the execution-contract version under which its state was created. The contract version is a semantic compatibility marker, not a source commit.
+
+Before inference on an exact `run.step`, the engine compares the run contract with the runtime contract. A mismatch moves the exact claimed event to `PAUSED`, clears its lease, and moves the run to `BLOCKED_CONTRACT` before the model is called. The run records the blocked event and whether it had been `RUNNING` or `WAITING`.
+
+    SOURCE UPGRADE != RUN MIGRATION
+    DURABLE STATE != SAFE TO REINTERPRET
+
+A contract-blocked run may be cancelled, but V1 deliberately provides no generic migration/resume command. A future `RUN_CONTRACT_VERSION` bump must ship an explicit transformation and verification path for any older version it claims to support. See `docs/RUN_CONTRACT_AFFINITY.md`.
+
 ### Verified progress ledger
 
 Task progress is not inferred from transcript length, model confidence, or the mere existence of a tool result.
