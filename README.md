@@ -31,6 +31,7 @@ See [docs/AUTONOMOUS_RUNTIME.md](docs/AUTONOMOUS_RUNTIME.md) for the autonomous-
 - Bounded retry with configurable attempt ceilings, durable `DEAD` state, failure evidence, dead-letter inspection, and explicit single-event redrive.
 - Interval schedules that emit idempotent events.
 - Durable runs and idempotently keyed run transcripts across model turns.
+- Run contract version affinity: durable work is stamped with its execution contract and fails closed as `BLOCKED_CONTRACT` before inference if a future runtime is incompatible.
 - Durable progress checkpoints with explicit `CANDIDATE -> VERIFIED | REJECTED` transitions, preserving the distinction between evidence and trusted progress.
 - Promptless `autonomous.turn` events classified as `EXTERNAL`, `TEMPORAL`, `OPEN_LOOP`, or `ENDOGENOUS`.
 - Reserved `pre_active.request_turn` support so a model can put its own durable run into `WAITING` and receive a later cognition turn without a new human prompt.
@@ -103,7 +104,7 @@ If a mutation handler loses its response after dispatch, Pre-Active records `ATT
   +------------------+
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/EFFECT_AND_RECOVERY.md](docs/EFFECT_AND_RECOVERY.md), and [docs/VERIFIED_PROGRESS.md](docs/VERIFIED_PROGRESS.md).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/EFFECT_AND_RECOVERY.md](docs/EFFECT_AND_RECOVERY.md), [docs/VERIFIED_PROGRESS.md](docs/VERIFIED_PROGRESS.md), and [docs/RUN_CONTRACT_AFFINITY.md](docs/RUN_CONTRACT_AFFINITY.md).
 
 ## Portfolio-derived design
 
