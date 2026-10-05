@@ -2,13 +2,25 @@
 
 # Pre-Active
 
-**Durable continuous execution for tool-using language models.**
+**Continuous resident runtime for self-initiating LLM agency.**
 
-The name is deliberate: **Pre-Active** is a preemptive active runtime, and a play on being proactive—work can be durably queued, resumed, and advanced by an active host process instead of requiring every step to begin with a fresh interactive prompt.
+Pre-Active exists so an LLM does **not** require a human prompt to receive every turn. While a Pre-Active daemon is actually running, the host can continuously monitor every observation source it has deliberately connected and authorized, preserve durable goals and open loops, and grant the model another cognition turn when external change, time, an actionable open loop, or the model's own durable re-entry request warrants attention.
 
-Pre-Active turns a stateless model call into a recoverable execution process: events wake work, durable state survives process restarts, relevant memory is injected into context, model turns are constrained to structured tool calls or a final answer, and external mutations are fenced behind idempotency and reconciliation rules.
+A user prompt is therefore only one possible cause of a model turn:
 
-The repository description calls this a continuous execution environment for LLM autonomy. In concrete terms, Pre-Active provides **process-level autonomy while a Pre-Active daemon is actually running**. It does not imply hidden activity when no process is running, model consciousness, unrestricted authority, or permission to perform effects a host has not granted.
+```text
+USER_PROMPT != MODEL_TURN
+CONTINUOUS_RUNTIME != CONTINUOUS_INFERENCE
+AUTONOMOUS_TURN != EFFECT_AUTHORITY
+```
+
+The runtime can remain resident 24/7 while the model sleeps between meaningful turns. The model can request a later turn through the reserved `pre_active.request_turn` primitive; that preserves the same durable run and capability set rather than manufacturing new authority.
+
+The name is deliberate: **Pre-Active** is a preemptive active runtime, and a play on being proactive—the runtime exists before the next prompt. Work can be observed, queued, resumed, reconsidered, and advanced by an active host process instead of requiring every step to begin with fresh human input.
+
+Pre-Active still preserves the harder effect boundary: events and autonomous turns create opportunities for cognition, not permission for arbitrary action. External mutations remain fenced behind capability admission, idempotency, reconciliation, and verified-effect rules.
+
+See [docs/AUTONOMOUS_RUNTIME.md](docs/AUTONOMOUS_RUNTIME.md) for the autonomous-turn contract and Observer/Initiator/Critic model.
 
 ## What V1 provides
 
@@ -19,7 +31,10 @@ The repository description calls this a continuous execution environment for LLM
 - Bounded retry with configurable attempt ceilings, durable `DEAD` state, failure evidence, dead-letter inspection, and explicit single-event redrive.
 - Interval schedules that emit idempotent events.
 - Durable runs and idempotently keyed run transcripts across model turns.
-- Cooperative durable `pause`, `resume`, and `cancel` controls applied at fenced execution boundaries; cancellation never claims an already-dispatched external effect stopped.
+- Promptless `autonomous.turn` events classified as `EXTERNAL`, `TEMPORAL`, `OPEN_LOOP`, or `ENDOGENOUS`.
+- Reserved `pre_active.request_turn` support so a model can put its own durable run into `WAITING` and receive a later cognition turn without a new human prompt.
+- Bounded per-run autonomous-turn budgets to stop recursive self-stimulation from becoming an unbounded inference loop.
+- Cooperative durable `pause`, `resume`, and `cancel` controls applied at fenced execution boundaries, including immediate control of `WAITING` autonomous turns; cancellation never claims an already-dispatched external effect stopped.
 - Atomic run creation + initial-step scheduling, with source-event-to-run binding so redelivered wakeups reuse the same run.
 - Per-step durable model-decision fencing before any tool dispatch.
 - Salience/relevance-based memory selection under a bounded context budget.
@@ -143,11 +158,31 @@ pre-active --state .pre-active/state.db daemon --poll-seconds 1
 # --lease-heartbeat-seconds 10
 # --max-lease-extension-seconds 900
 # --max-event-attempts 16
+# --max-autonomous-turns-per-run 16
 ```
 
 For the bundled OpenAI-compatible adapter, network/timeouts and HTTP `408`, `429`, `500`, `502`, `503`, and `504` are treated as retryable provider failures. Other HTTP `4xx` responses and malformed provider protocol/JSON are terminal for that run. Retryable provider failures retain the existing event-attempt ceiling, add deterministic per-event jitter, and honor a valid HTTP `Retry-After` value as a minimum delay.
 
-Schedule a recurring task:
+Grant a model turn without a human prompt:
+
+```bash
+pre-active --state .pre-active/state.db autonomous-turn \
+  "Inspect the changed CI state" \
+  --source EXTERNAL \
+  --reason "A monitored pull request changed from green to red"
+```
+
+Schedule recurring autonomous cognition:
+
+```bash
+pre-active --state .pre-active/state.db schedule \
+  "Reconsider unresolved architecture questions" \
+  --every 300 \
+  --autonomous \
+  --reason "Periodic reconsideration was explicitly requested"
+```
+
+Ordinary scheduled tasks remain available:
 
 ```bash
 pre-active --state .pre-active/state.db schedule \

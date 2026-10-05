@@ -170,3 +170,16 @@ After reconciliation:
 - confirmed no effect + PAUSE: the exact mutation is not retried; the run becomes `PAUSED`; a later resume reuses the already-admitted model decision and exact persisted request identity.
 
 This preserves the effect contract while giving operators durable control over future orchestration progress.
+
+
+## Autonomous cognition is not effect authority
+
+Pre-Active may grant a model turn without a human prompt, and a model may request a later turn through the runtime's reserved autonomy primitive. Neither event creates new tool authority.
+
+```text
+USER_PROMPT != MODEL_TURN
+AUTONOMOUS_TURN != CAPABILITY_GRANT
+INITIATIVE != EFFECT_AUTHORITY
+```
+
+An endogenous re-entry preserves the same run capability set. A new `autonomous.turn` receives only the capabilities explicitly supplied by its host producer. All existing mutation admission, ambiguity, reconciliation, and verified-effect boundaries remain unchanged.

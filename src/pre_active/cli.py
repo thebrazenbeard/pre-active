@@ -54,6 +54,7 @@ def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
         max_lease_extension_seconds=args.max_lease_extension_seconds,
         max_event_attempts=args.max_event_attempts,
         max_steps=args.max_steps,
+        max_autonomous_turns_per_run=args.max_autonomous_turns_per_run,
     )
     return Daemon(scheduler=Scheduler(store), engine=engine)
 
@@ -72,6 +73,29 @@ def build_parser() -> argparse.ArgumentParser:
     schedule.add_argument("--every", type=float, required=True, help="interval in seconds")
     schedule.add_argument("--first-at", type=float)
     schedule.add_argument("--capability", action="append", default=[])
+    schedule.add_argument(
+        "--autonomous",
+        action="store_true",
+        help="emit autonomous model turns instead of ordinary task requests",
+    )
+    schedule.add_argument(
+        "--reason",
+        help="why this temporal condition warrants an autonomous model turn",
+    )
+
+    autonomous = sub.add_parser(
+        "autonomous-turn",
+        help="grant a model turn without requiring a human prompt",
+    )
+    autonomous.add_argument("task")
+    autonomous.add_argument(
+        "--source",
+        choices=["EXTERNAL", "TEMPORAL", "OPEN_LOOP", "ENDOGENOUS"],
+        default="EXTERNAL",
+    )
+    autonomous.add_argument("--reason", required=True)
+    autonomous.add_argument("--after", type=float, default=0.0, help="delay in seconds")
+    autonomous.add_argument("--capability", action="append", default=[])
 
     memory = sub.add_parser("remember", help="add durable context memory")
     memory.add_argument("content")
@@ -112,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
         run.add_argument("--max-lease-extension-seconds", type=float, default=900.0)
         run.add_argument("--max-event-attempts", type=int, default=16)
         run.add_argument("--max-steps", type=int, default=24)
+        run.add_argument("--max-autonomous-turns-per-run", type=int, default=16)
         if name == "daemon":
             run.add_argument("--poll-seconds", type=float, default=1.0)
 
@@ -129,14 +154,53 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "schedule":
             first_at = args.first_at if args.first_at is not None else now + args.every
+            kind = "task.requested"
+            payload = {
+                "task": args.task,
+                "capabilities": sorted(set(args.capability)),
+            }
+            if args.autonomous:
+                if not args.reason or not args.reason.strip():
+                    raise SystemExit("--autonomous schedules require --reason")
+                kind = "autonomous.turn"
+                payload.update(
+                    {
+                        "source": "TEMPORAL",
+                        "reason": args.reason.strip(),
+                    }
+                )
             schedule_id = Scheduler(store).add_interval(
-                kind="task.requested",
-                payload={"task": args.task, "capabilities": sorted(set(args.capability))},
+                kind=kind,
+                payload=payload,
                 every_seconds=args.every,
                 first_at=first_at,
                 now=now,
             )
             print(json.dumps({"schedule_id": schedule_id, "first_at": first_at}, sort_keys=True))
+            return 0
+        if args.command == "autonomous-turn":
+            if args.after < 0:
+                raise SystemExit("--after must be >= 0")
+            event_id = store.request_autonomous_turn(
+                task=args.task,
+                capabilities=set(args.capability),
+                source=args.source,
+                reason=args.reason,
+                now=now,
+                available_at=now + args.after,
+                dedup_key=None,
+            )
+            print(
+                json.dumps(
+                    {
+                        "event_id": event_id,
+                        "kind": "autonomous.turn",
+                        "source": args.source,
+                        "available_at": now + args.after,
+                    },
+                    sort_keys=True,
+                )
+            )
             return 0
         if args.command == "remember":
             memory_id = store.add_memory(

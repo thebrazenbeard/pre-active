@@ -281,6 +281,9 @@ class ToolRegistry:
         self._specs[spec.name] = spec
         self._handlers[spec.name] = handler
 
+    def has(self, name: str) -> bool:
+        return name in self._specs
+
     def specs(self, allowed_capabilities: set[str]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for name in sorted(self._specs):

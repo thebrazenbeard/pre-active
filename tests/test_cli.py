@@ -256,3 +256,75 @@ def test_status_cli_emits_operational_snapshot_with_compatibility_fields(
     assert payload["events"]["ready_pending"] == 1
     assert payload["events"]["delayed_pending"] == 1
     assert payload["schedules"] == {"due": 0, "enabled": 0}
+
+
+
+def test_autonomous_turn_cli_enqueues_promptless_model_turn(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    state = tmp_path / "state.db"
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 100.0)
+
+    assert main([
+        "--state", str(state),
+        "autonomous-turn", "Inspect the changed repository.",
+        "--source", "OPEN_LOOP",
+        "--reason", "A durable unresolved goal became actionable.",
+        "--after", "30",
+        "--capability", "repo.read",
+    ]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["kind"] == "autonomous.turn"
+    assert payload["source"] == "OPEN_LOOP"
+    assert payload["available_at"] == 130.0
+
+    store = Store(state)
+    [event] = store.list_events(kind="autonomous.turn")
+    assert event["payload"]["task"] == "Inspect the changed repository."
+    assert event["payload"]["source"] == "OPEN_LOOP"
+    assert event["payload"]["capabilities"] == ["repo.read"]
+    row = store.connection.execute(
+        "SELECT available_at FROM events WHERE id=?", (event["id"],)
+    ).fetchone()
+    assert row is not None and float(row["available_at"]) == 130.0
+    store.close()
+
+
+def test_schedule_can_emit_temporal_autonomous_turns(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    state = tmp_path / "state.db"
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 200.0)
+
+    assert main([
+        "--state", str(state),
+        "schedule", "Reconsider unresolved architecture questions.",
+        "--every", "60",
+        "--autonomous",
+        "--reason", "Periodic reconsideration was requested.",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["first_at"] == 260.0
+
+    store = Store(state)
+    row = store.connection.execute(
+        "SELECT kind, payload_json, next_at FROM schedules WHERE id=?",
+        (payload["schedule_id"],),
+    ).fetchone()
+    assert row is not None
+    assert row["kind"] == "autonomous.turn"
+    scheduled = json.loads(row["payload_json"])
+    assert scheduled["source"] == "TEMPORAL"
+    assert scheduled["reason"] == "Periodic reconsideration was requested."
+    store.close()
+
+
+def test_runtime_cli_exposes_autonomous_turn_budget() -> None:
+    args = build_parser().parse_args([
+        "run-once",
+        "--base-url", "http://127.0.0.1:1/v1",
+        "--model", "test-model",
+        "--max-autonomous-turns-per-run", "7",
+    ])
+    assert args.max_autonomous_turns_per_run == 7

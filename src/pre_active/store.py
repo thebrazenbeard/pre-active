@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS runs (
     paused_event_id TEXT,
     paused_at REAL,
     cancelled_at REAL,
+    autonomous_turn_count INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -120,43 +121,50 @@ class Store:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.executescript(_SCHEMA)
-        event_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(events)")}
-        if "lease_token" not in event_columns:
-            self.connection.execute("ALTER TABLE events ADD COLUMN lease_token TEXT")
-        if "last_error" not in event_columns:
-            self.connection.execute("ALTER TABLE events ADD COLUMN last_error TEXT")
-        if "dead_lettered_at" not in event_columns:
-            self.connection.execute("ALTER TABLE events ADD COLUMN dead_lettered_at REAL")
-        run_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(runs)")}
-        if "blocked_request_id" not in run_columns:
-            self.connection.execute("ALTER TABLE runs ADD COLUMN blocked_request_id TEXT")
-        if "source_event_id" not in run_columns:
-            self.connection.execute("ALTER TABLE runs ADD COLUMN source_event_id TEXT")
-        if "failed_event_id" not in run_columns:
-            self.connection.execute("ALTER TABLE runs ADD COLUMN failed_event_id TEXT")
-        for column, ddl in (
-            ("control_action", "TEXT"),
-            ("control_reason", "TEXT"),
-            ("control_requested_at", "REAL"),
-            ("paused_event_id", "TEXT"),
-            ("paused_at", "REAL"),
-            ("cancelled_at", "REAL"),
-        ):
-            if column not in run_columns:
-                self.connection.execute(f"ALTER TABLE runs ADD COLUMN {column} {ddl}")
-        self.connection.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS runs_source_event_idx ON runs(source_event_id) "
-            "WHERE source_event_id IS NOT NULL"
-        )
-        message_columns = {
-            row["name"] for row in self.connection.execute("PRAGMA table_info(run_messages)")
-        }
-        if "message_key" not in message_columns:
-            self.connection.execute("ALTER TABLE run_messages ADD COLUMN message_key TEXT")
-        self.connection.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS run_messages_key_idx "
-            "ON run_messages(run_id, message_key) WHERE message_key IS NOT NULL"
-        )
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            event_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(events)")}
+            if "lease_token" not in event_columns:
+                self.connection.execute("ALTER TABLE events ADD COLUMN lease_token TEXT")
+            if "last_error" not in event_columns:
+                self.connection.execute("ALTER TABLE events ADD COLUMN last_error TEXT")
+            if "dead_lettered_at" not in event_columns:
+                self.connection.execute("ALTER TABLE events ADD COLUMN dead_lettered_at REAL")
+            run_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(runs)")}
+            if "blocked_request_id" not in run_columns:
+                self.connection.execute("ALTER TABLE runs ADD COLUMN blocked_request_id TEXT")
+            if "source_event_id" not in run_columns:
+                self.connection.execute("ALTER TABLE runs ADD COLUMN source_event_id TEXT")
+            if "failed_event_id" not in run_columns:
+                self.connection.execute("ALTER TABLE runs ADD COLUMN failed_event_id TEXT")
+            for column, ddl in (
+                ("control_action", "TEXT"),
+                ("control_reason", "TEXT"),
+                ("control_requested_at", "REAL"),
+                ("paused_event_id", "TEXT"),
+                ("paused_at", "REAL"),
+                ("cancelled_at", "REAL"),
+                ("autonomous_turn_count", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if column not in run_columns:
+                    self.connection.execute(f"ALTER TABLE runs ADD COLUMN {column} {ddl}")
+            self.connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS runs_source_event_idx ON runs(source_event_id) "
+                "WHERE source_event_id IS NOT NULL"
+            )
+            message_columns = {
+                row["name"] for row in self.connection.execute("PRAGMA table_info(run_messages)")
+            }
+            if "message_key" not in message_columns:
+                self.connection.execute("ALTER TABLE run_messages ADD COLUMN message_key TEXT")
+            self.connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS run_messages_key_idx "
+                "ON run_messages(run_id, message_key) WHERE message_key IS NOT NULL"
+            )
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
 
     def close(self) -> None:
         self.connection.close()
@@ -369,6 +377,7 @@ class Store:
             "paused_event_id": row["paused_event_id"],
             "paused_at": row["paused_at"],
             "cancelled_at": row["cancelled_at"],
+            "autonomous_turn_count": int(row["autonomous_turn_count"]),
         }
 
     def request_run_control(
@@ -386,7 +395,7 @@ class Store:
         try:
             row = self.connection.execute(
                 """
-                SELECT status, control_action, control_reason, paused_event_id
+                SELECT status, step_count, control_action, control_reason, paused_event_id
                 FROM runs WHERE id=?
                 """,
                 (run_id,),
@@ -400,6 +409,113 @@ class Store:
             if current == "CANCEL" and normalized == "PAUSE":
                 raise RuntimeError("cannot replace CANCEL with PAUSE")
             if current == normalized and row["control_reason"] == reason:
+                self.connection.execute("COMMIT")
+                return
+
+            if status == "WAITING":
+                step = int(row["step_count"])
+                event = self.connection.execute(
+                    """
+                    SELECT id, status FROM events
+                    WHERE dedup_key=?
+                    """,
+                    (f"run-step:{run_id}:{step}",),
+                ).fetchone()
+                if event is None or str(event["status"]) != "PENDING":
+                    raise RuntimeError(
+                        "waiting run lost its pending autonomous turn event"
+                    )
+                event_id = str(event["id"])
+                self.append_journal(
+                    event_type="RUN_CONTROL_REQUESTED",
+                    subject_id=run_id,
+                    payload={"action": normalized, "reason": reason},
+                    now=now,
+                )
+                if normalized == "PAUSE":
+                    event_cursor = self.connection.execute(
+                        """
+                        UPDATE events
+                        SET status='PAUSED', updated_at=?
+                        WHERE id=? AND status='PENDING'
+                        """,
+                        (now, event_id),
+                    )
+                    if event_cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "waiting run pause lost pending autonomous event"
+                        )
+                    run_cursor = self.connection.execute(
+                        """
+                        UPDATE runs
+                        SET status='PAUSED', control_action=NULL,
+                            control_reason=?, control_requested_at=?,
+                            paused_event_id=?, paused_at=?, updated_at=?
+                        WHERE id=? AND status='WAITING' AND step_count=?
+                        """,
+                        (reason, now, event_id, now, now, run_id, step),
+                    )
+                    if run_cursor.rowcount != 1:
+                        raise RuntimeError("waiting run pause lost WAITING state")
+                    self.append_journal(
+                        event_type="EVENT_PAUSED",
+                        subject_id=event_id,
+                        payload={"run_id": run_id, "from_waiting": True},
+                        now=now,
+                    )
+                    self.append_journal(
+                        event_type="RUN_PAUSED",
+                        subject_id=run_id,
+                        payload={
+                            "event_id": event_id,
+                            "reason": reason,
+                            "from_waiting": True,
+                        },
+                        now=now,
+                    )
+                else:
+                    event_cursor = self.connection.execute(
+                        """
+                        UPDATE events
+                        SET status='CANCELLED', updated_at=?
+                        WHERE id=? AND status='PENDING'
+                        """,
+                        (now, event_id),
+                    )
+                    if event_cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "waiting run cancellation lost pending autonomous event"
+                        )
+                    run_cursor = self.connection.execute(
+                        """
+                        UPDATE runs
+                        SET status='CANCELLED', control_action=NULL,
+                            control_reason=?, control_requested_at=?,
+                            paused_event_id=NULL, cancelled_at=?, updated_at=?
+                        WHERE id=? AND status='WAITING' AND step_count=?
+                        """,
+                        (reason, now, now, now, run_id, step),
+                    )
+                    if run_cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "waiting run cancellation lost WAITING state"
+                        )
+                    self.append_journal(
+                        event_type="EVENT_CANCELLED",
+                        subject_id=event_id,
+                        payload={"run_id": run_id, "from_waiting": True},
+                        now=now,
+                    )
+                    self.append_journal(
+                        event_type="RUN_CANCELLED",
+                        subject_id=run_id,
+                        payload={
+                            "event_id": event_id,
+                            "reason": reason,
+                            "from_waiting": True,
+                        },
+                        now=now,
+                    )
                 self.connection.execute("COMMIT")
                 return
 
@@ -932,6 +1048,124 @@ class Store:
         except BaseException:
             self.connection.execute("ROLLBACK")
             raise
+
+    def request_autonomous_turn(
+        self,
+        *,
+        task: str,
+        capabilities: set[str],
+        source: str,
+        reason: str,
+        now: float,
+        available_at: float | None = None,
+        dedup_key: str | None = None,
+        priority: int = 0,
+    ) -> str:
+        normalized_source = source.upper().strip()
+        if normalized_source not in {"EXTERNAL", "TEMPORAL", "OPEN_LOOP", "ENDOGENOUS"}:
+            raise ValueError("autonomous turn source must be EXTERNAL, TEMPORAL, OPEN_LOOP, or ENDOGENOUS")
+        if not task.strip():
+            raise ValueError("autonomous turn task is required")
+        if not reason.strip():
+            raise ValueError("autonomous turn reason is required")
+        return self.enqueue_event(
+            kind="autonomous.turn",
+            payload={
+                "task": task.strip(),
+                "capabilities": sorted(capabilities),
+                "source": normalized_source,
+                "reason": reason.strip(),
+            },
+            priority=priority,
+            dedup_key=dedup_key,
+            now=now,
+            available_at=available_at,
+        )
+
+    def defer_run_for_autonomous_turn(
+        self,
+        *,
+        run_id: str,
+        expected_step: int,
+        reason: str,
+        delay_seconds: float,
+        priority: int,
+        now: float,
+    ) -> int:
+        if not reason.strip():
+            raise ValueError("autonomous turn reason is required")
+        if delay_seconds < 0:
+            raise ValueError("delay_seconds must be >= 0")
+        next_step = int(expected_step) + 1
+        owns_transaction = not self.connection.in_transaction
+        if owns_transaction:
+            self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self.connection.execute(
+                """
+                UPDATE runs
+                SET status='WAITING', step_count=step_count+1,
+                    autonomous_turn_count=autonomous_turn_count+1,
+                    last_error=NULL, updated_at=?
+                WHERE id=? AND status='RUNNING' AND step_count=?
+                """,
+                (now, run_id, int(expected_step)),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    "autonomous turn deferral lost expected run generation"
+                )
+            self.enqueue_event(
+                kind="run.step",
+                payload={
+                    "run_id": run_id,
+                    "step": next_step,
+                    "autonomous": True,
+                    "source": "ENDOGENOUS",
+                    "reason": reason.strip(),
+                },
+                priority=priority,
+                dedup_key=f"run-step:{run_id}:{next_step}",
+                now=now,
+                available_at=now + float(delay_seconds),
+            )
+            self.append_journal(
+                event_type="AUTONOMOUS_TURN_REQUESTED",
+                subject_id=run_id,
+                payload={
+                    "source": "ENDOGENOUS",
+                    "reason": reason.strip(),
+                    "next_step": next_step,
+                    "not_before": now + float(delay_seconds),
+                },
+                now=now,
+            )
+            if owns_transaction:
+                self.connection.execute("COMMIT")
+        except BaseException:
+            if owns_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
+        return next_step
+
+    def activate_waiting_run(
+        self, *, run_id: str, expected_step: int, reason: str, now: float
+    ) -> None:
+        cursor = self.connection.execute(
+            """
+            UPDATE runs SET status='RUNNING', updated_at=?
+            WHERE id=? AND status='WAITING' AND step_count=?
+            """,
+            (now, run_id, int(expected_step)),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("autonomous turn activation lost expected waiting generation")
+        self.append_journal(
+            event_type="AUTONOMOUS_TURN_GRANTED",
+            subject_id=run_id,
+            payload={"source": "ENDOGENOUS", "reason": reason, "step": int(expected_step)},
+            now=now,
+        )
 
     def update_run(
         self, run_id: str, *, now: float, status: str | None = None,

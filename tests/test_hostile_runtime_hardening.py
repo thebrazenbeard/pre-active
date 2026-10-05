@@ -350,10 +350,9 @@ def test_concurrent_store_openers_serialize_legacy_schema_migration(
     barrier = threading.Barrier(2)
 
     class BarrierConnection(sqlite3.Connection):
-        def execute(self, sql, parameters=(), /):  # type: ignore[no-untyped-def]
-            cursor = super().execute(sql, parameters)
-            if sql.strip().lower() == "pragma table_info(events)":
-                barrier.wait(timeout=3.0)
+        def executescript(self, sql):  # type: ignore[no-untyped-def]
+            cursor = super().executescript(sql)
+            barrier.wait(timeout=3.0)
             return cursor
 
     def connect(*args, **kwargs):  # type: ignore[no-untyped-def]

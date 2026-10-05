@@ -4,7 +4,9 @@ Status: executable V1 candidate.
 
 ## Purpose
 
-Pre-Active is a host-side continuity and execution kernel for stateless language-model inference. It owns durable orchestration state; a model remains a replaceable reasoning component. A host may run Pre-Active continuously, wake it from schedules or external events, and bind tool adapters to real systems without treating model output as effect authority.
+Pre-Active is a continuous resident runtime for stateless language-model inference. Its defining purpose is to let a model receive justified cognition turns without requiring a human to prompt every turn. A running host may continuously monitor authorized observation sources, retain durable goals and open loops, grant turns from external change, time, open-loop activation, or model-requested re-entry, and bind tool adapters to real systems without treating initiative as effect authority.
+
+The runtime is continuous; model inference is selective. `USER_PROMPT != MODEL_TURN`, `CONTINUOUS_RUNTIME != CONTINUOUS_INFERENCE`, and `AUTONOMOUS_TURN != EFFECT_AUTHORITY`.
 
 The architecture is intentionally self-contained. Portfolio repositories influenced its invariants, but Pre-Active has no sibling-repository runtime dependency.
 
@@ -32,6 +34,16 @@ The snapshot deliberately does not emit event IDs, run IDs, arbitrary error stri
 
 The CLI `pre-active status` projects this snapshot directly while retaining its prior top-level compatibility fields.
 
+### Autonomous cognition
+
+`autonomous.turn` is the durable event surface for promptless new-run cognition. Its source is explicitly classified as `EXTERNAL`, `TEMPORAL`, `OPEN_LOOP`, or `ENDOGENOUS`, and its reason is injected into the task context so the model can distinguish why the runtime granted the turn.
+
+For same-run endogenous continuity, the engine always exposes the reserved core tool `pre_active.request_turn`. A successful request atomically advances the run generation, moves the run to `WAITING`, enqueues the exact future `run.step`, journals the reason, and acknowledges the current event under the active claim fence. When the future step matures, the same run returns to `RUNNING` with the same capabilities and durable transcript.
+
+A per-run autonomous-turn budget bounds recursive self-stimulation. `WAITING` remains operator-controllable: pause/cancel can stop the exact pending future turn before it matures.
+
+The Observer/Initiator/Critic separation and authority semantics are defined in `docs/AUTONOMOUS_RUNTIME.md`.
+
 ### Scheduler
 
 `pre_active.scheduler.Scheduler` emits due schedule occurrences into the same durable queue used by external events. Each occurrence has a stable deduplication key derived from schedule ID and due timestamp, so rerunning a scheduler tick does not create duplicate occurrences.
@@ -53,6 +65,8 @@ A run has these operational states:
 ```text
 RUNNING -> COMPLETED
    |
+   +----> WAITING -> RUNNING
+   |
    +----> FAILED
    |
    +----> PAUSED -> RUNNING
@@ -71,7 +85,7 @@ A cancel request does not terminate a worker process or prove an already-dispatc
 
 If a PAUSE request is still pending on a `RUNNING` run and has not reached a safe boundary, `resume` may atomically withdraw that pending PAUSE without disturbing the current event. A pending CANCEL cannot be withdrawn through resume.
 
-`max_steps` bounds runaway tool/reasoning cycles. `max_event_attempts` bounds transient retry loops; the default is 16 attempts, deliberately above the historical ten-attempt backend-recovery observation recorded for the Windows runtime.
+`max_steps` bounds runaway tool/reasoning cycles. `max_autonomous_turns_per_run` separately bounds model-requested future cognition so a run cannot recursively self-stimulate forever; the default is 16 autonomous re-entries. `max_event_attempts` bounds transient infrastructure retry loops; its default is also 16 attempts.
 
 ### Context assembler
 
