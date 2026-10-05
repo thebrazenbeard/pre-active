@@ -32,8 +32,10 @@ def test_scheduled_tasks_own_long_lived_python_processes_directly() -> None:
 
 def test_registration_binds_exact_source_into_pinned_python() -> None:
     text = (WINDOWS / "register-tasks.ps1").read_text(encoding="utf-8")
-    assert "-m pip install" in text
-    assert "--no-deps --no-build-isolation -e" in text
+    assert "pre_active_source.pth" in text
+    assert 'Set-Content -Path $sourceBinding -Value (Join-Path $source "src")' in text
+    assert "import pathlib, pre_active" in text
+    assert "-m pip install" not in text
     assert "Failed to bind Pre-Active source into pinned Python" in text
 
 
