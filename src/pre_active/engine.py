@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
+import math
 from typing import Any, Protocol
 
 from .context import ContextAssembler
-from .store import Store
+from .lease import LeaseHeartbeat, LeaseLost
+from .store import Event, EventLeaseLost, Store
 from .tools import AmbiguousEffect, ToolError, ToolRegistry
 
 
@@ -24,6 +27,76 @@ class ModelResponse:
     def __post_init__(self) -> None:
         if (self.final_text is None) == (self.tool_call is None):
             raise ValueError("model response must contain exactly one of final_text or tool_call")
+
+
+def _model_retry_delay_seconds(
+    *,
+    event_id: str,
+    attempts: int,
+    retry_after_seconds: float | None,
+) -> float:
+    if attempts < 1:
+        raise ValueError("attempts must be >= 1")
+    base = min(60.0, 2.0 ** min(int(attempts), 6))
+    digest = hashlib.sha256(f"{event_id}:{attempts}".encode("utf-8")).digest()
+    jitter = int.from_bytes(digest[:8], "big") / float(1 << 64)
+    computed = base + jitter
+    if retry_after_seconds is None:
+        return computed
+    if retry_after_seconds < 0:
+        raise ValueError("retry_after_seconds must be >= 0")
+    return max(computed, float(retry_after_seconds))
+
+
+class ModelError(RuntimeError):
+    """Base class for model/provider failures with explicit retry semantics."""
+
+
+class RetryableModelError(ModelError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        if not category.strip():
+            raise ValueError("retryable model error category is required")
+        if retry_after_seconds is not None and retry_after_seconds < 0:
+            raise ValueError("retry_after_seconds must be >= 0")
+        self.category = category
+        self.retry_after_seconds = retry_after_seconds
+
+
+class NonRetryableModelError(ModelError):
+    """Model/provider failure that should not consume infrastructure retries."""
+
+
+class RunControlApplied(RuntimeError):
+    """Internal signal that durable run control stopped tool dispatch."""
+
+
+AUTONOMOUS_TURN_TOOL_NAME = "pre_active.request_turn"
+AUTONOMOUS_TURN_TOOL_SPEC: dict[str, Any] = {
+    "name": AUTONOMOUS_TURN_TOOL_NAME,
+    "description": (
+        "Request a future autonomous cognition turn without a human prompt. "
+        "This schedules another model turn for the same durable run and preserves "
+        "the run's existing capabilities; it grants no new effect authority."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "reason": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "delay_seconds": {"type": "number", "minimum": 0},
+        },
+        "required": ["reason"],
+        "additionalProperties": False,
+    },
+    "capability": "pre_active.internal.autonomy",
+    "mutation": False,
+}
 
 
 class ModelAdapter(Protocol):
@@ -76,16 +149,32 @@ class Engine:
         system_prompt: str,
         worker_id: str,
         lease_seconds: float = 30.0,
+        lease_heartbeat_seconds: float | None = None,
+        max_lease_extension_seconds: float = 900.0,
+        max_event_attempts: int = 16,
         max_steps: int = 24,
+        max_autonomous_turns_per_run: int = 16,
     ) -> None:
         self.store = store
         self.model = model
         self.tools = tools
+        if self.tools.has(AUTONOMOUS_TURN_TOOL_NAME):
+            raise ValueError(
+                f"{AUTONOMOUS_TURN_TOOL_NAME} is reserved by the Pre-Active runtime"
+            )
         self.context = context
         self.system_prompt = system_prompt
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
+        self.lease_heartbeat_seconds = lease_heartbeat_seconds
+        if max_event_attempts < 1:
+            raise ValueError("max_event_attempts must be >= 1")
+        self.max_lease_extension_seconds = max_lease_extension_seconds
+        self.max_event_attempts = int(max_event_attempts)
         self.max_steps = max_steps
+        if max_autonomous_turns_per_run < 0:
+            raise ValueError("max_autonomous_turns_per_run must be >= 0")
+        self.max_autonomous_turns_per_run = int(max_autonomous_turns_per_run)
 
     def submit_task(
         self,
@@ -103,6 +192,28 @@ class Engine:
             priority=0,
         )
 
+    def _tool_specs_for_run(self, run: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            *self.tools.specs(run["capabilities"]),
+            dict(AUTONOMOUS_TURN_TOOL_SPEC),
+        ]
+
+    def _parse_autonomous_turn_request(
+        self, arguments: dict[str, Any]
+    ) -> tuple[str, float]:
+        if set(arguments) - {"reason", "delay_seconds"}:
+            raise ValueError("autonomous turn request contains unsupported fields")
+        reason = arguments.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("autonomous turn reason must be non-empty text")
+        delay = arguments.get("delay_seconds", 0.0)
+        if isinstance(delay, bool) or not isinstance(delay, (int, float)):
+            raise ValueError("autonomous turn delay_seconds must be numeric")
+        delay_seconds = float(delay)
+        if not math.isfinite(delay_seconds) or delay_seconds < 0:
+            raise ValueError("autonomous turn delay_seconds must be finite and >= 0")
+        return reason.strip(), delay_seconds
+
     def _messages_for_run(self, run: dict[str, Any]) -> list[dict[str, str]]:
         transcript = self.store.list_run_messages(run["id"])
         task = run["task"]
@@ -115,11 +226,51 @@ class Engine:
             query=run["task"],
         )
 
+    def _apply_pending_control(
+        self,
+        *,
+        event: Event,
+        run_id: str,
+        heartbeat: LeaseHeartbeat,
+        advance_step: bool = False,
+    ) -> str | None:
+        with self.store.active_claim_transaction(
+            event.id,
+            worker_id=self.worker_id,
+            lease_token=event.lease_token or "",
+            now=heartbeat.current_time,
+            validate=heartbeat.assert_owned,
+        ) as transition_now:
+            return self.store.apply_claimed_run_control(
+                run_id=run_id,
+                event_id=event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token or "",
+                now=transition_now,
+                advance_step=advance_step,
+            )
+
     def resume_blocked_effect(self, run_id: str, *, now: float) -> None:
         run = self.store.get_run(run_id)
         if run["status"] != "BLOCKED_EFFECT" or not run["blocked_request_id"]:
             raise RuntimeError("run is not blocked on an unresolved effect")
-        request_id = str(run["blocked_request_id"] )
+        request_id = str(run["blocked_request_id"])
+        effect_state = self.tools.effect_state(request_id)
+        control_action = run["control_action"]
+
+        # A reconciled no-effect mutation must not be retried merely to satisfy
+        # recovery when the operator has already asked to pause or cancel.
+        if (
+            control_action in {"PAUSE", "CANCEL"}
+            and effect_state == "RECONCILED_NO_EFFECT"
+        ):
+            self.store.apply_blocked_run_control_after_reconciliation(
+                run_id,
+                now=now,
+                effect_completed=False,
+            )
+            return
+
         result = self.tools.recover_reconciled(
             request_id=request_id,
             allowed_capabilities=run["capabilities"],
@@ -132,6 +283,19 @@ class Engine:
             now=now,
             message_key=f"effect:{request_id}:reconciled-result",
         )
+
+        # Control may have arrived while an exact no-effect retry was already
+        # executing. At that point the operation is allowed to finish and its
+        # result is recorded before control is applied.
+        refreshed = self.store.get_run(run_id)
+        if refreshed["control_action"] in {"PAUSE", "CANCEL"}:
+            self.store.apply_blocked_run_control_after_reconciliation(
+                run_id,
+                now=now,
+                effect_completed=True,
+            )
+            return
+
         self.store.resume_run_after_effect(run_id=run_id, now=now, priority=0)
 
     def run_once(self, *, now: float) -> str | None:
@@ -142,7 +306,29 @@ class Engine:
         )
         if event is None:
             return None
-        if event.kind == "task.requested":
+        if not event.lease_token:
+            raise RuntimeError("claimed event missing lease token")
+        heartbeat = LeaseHeartbeat(
+            state_path=self.store.path,
+            event_id=event.id,
+            worker_id=self.worker_id,
+            lease_token=event.lease_token,
+            claimed_at=now,
+            lease_seconds=self.lease_seconds,
+            heartbeat_seconds=self.lease_heartbeat_seconds,
+            max_extension_seconds=self.max_lease_extension_seconds,
+        )
+        with heartbeat:
+            return self._run_claimed_event(event=event, now=now, heartbeat=heartbeat)
+
+    def _run_claimed_event(
+        self,
+        *,
+        event: Event,
+        now: float,
+        heartbeat: LeaseHeartbeat,
+    ) -> str | None:
+        if event.kind in {"task.requested", "autonomous.turn"}:
             task = event.payload.get("task")
             capabilities = event.payload.get("capabilities", [])
             if not isinstance(task, str) or not task.strip():
@@ -152,7 +338,12 @@ class Engine:
                     payload={"reason": "task.requested task must be a non-empty string"},
                     now=now,
                 )
-                self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+                self.store.ack_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time(),
+            )
                 return None
             if not isinstance(capabilities, list) or not all(
                 isinstance(item, str) for item in capabilities
@@ -163,37 +354,142 @@ class Engine:
                     payload={"reason": "task.requested capabilities must be a list of strings"},
                     now=now,
                 )
-                self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+                self.store.ack_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time(),
+            )
                 return None
+            effective_task = task.strip()
+            if event.kind == "autonomous.turn":
+                source = event.payload.get("source")
+                reason = event.payload.get("reason")
+                if (
+                    source not in {"EXTERNAL", "TEMPORAL", "OPEN_LOOP", "ENDOGENOUS"}
+                    or not isinstance(reason, str)
+                    or not reason.strip()
+                ):
+                    self.store.append_journal(
+                        event_type="EVENT_REJECTED",
+                        subject_id=event.id,
+                        payload={
+                            "reason": (
+                                "autonomous.turn requires a valid source and "
+                                "non-empty reason"
+                            )
+                        },
+                        now=now,
+                    )
+                    self.store.ack_event(
+                        event.id,
+                        worker_id=self.worker_id,
+                        lease_token=event.lease_token,
+                        now=heartbeat.current_time(),
+                    )
+                    return None
+                effective_task = (
+                    "Autonomous model turn. No human prompt caused this turn.\n"
+                    f"Source: {source}\n"
+                    f"Reason: {reason.strip()}\n\n"
+                    f"Task:\n{effective_task}"
+                )
             run_id = self.submit_task(
-                task.strip(),
+                effective_task,
                 set(capabilities),
                 now=now,
                 source_event_id=event.id,
             )
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            if event.kind == "autonomous.turn":
+                self.store.append_journal(
+                    event_type="AUTONOMOUS_TURN_GRANTED",
+                    subject_id=run_id,
+                    payload={
+                        "source": event.payload["source"],
+                        "reason": event.payload["reason"],
+                        "source_event_id": event.id,
+                    },
+                    now=now,
+                )
+            self.store.ack_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time(),
+            )
             return run_id
         if event.kind != "run.step":
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time(),
+            )
             return None
 
         run_id = str(event.payload["run_id"])
         run = self.store.get_run(run_id)
         event_step = event.payload.get("step")
         if not isinstance(event_step, int) or event_step != run["step_count"]:
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time(),
+            )
             return run_id
+        if run["status"] == "WAITING" and event.payload.get("autonomous") is True:
+            reason = event.payload.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
+                raise RuntimeError("autonomous run.step is missing its reason")
+            with self.store.active_claim_transaction(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time,
+                validate=heartbeat.assert_owned,
+            ) as transition_now:
+                self.store.activate_waiting_run(
+                    run_id=run_id,
+                    expected_step=run["step_count"],
+                    reason=reason.strip(),
+                    now=transition_now,
+                )
+            run = self.store.get_run(run_id)
         if run["status"] != "RUNNING":
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            self.store.ack_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time(),
+            )
+            return run_id
+        if self._apply_pending_control(
+            event=event,
+            run_id=run_id,
+            heartbeat=heartbeat,
+        ) is not None:
             return run_id
         if run["step_count"] >= self.max_steps:
-            self.store.update_run(
-                run_id,
-                now=now,
-                status="FAILED",
-                last_error="max_steps exceeded",
-            )
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+            with self.store.active_claim_transaction(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time,
+                validate=heartbeat.assert_owned,
+            ) as transition_now:
+                self.store.update_run(
+                    run_id,
+                    now=transition_now,
+                    status="FAILED",
+                    last_error="max_steps exceeded",
+                )
+                self.store.ack_event(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=transition_now,
+                )
             return run_id
 
         try:
@@ -203,28 +499,196 @@ class Engine:
             if stored_decision is None:
                 response = self.model.respond(
                     messages=self._messages_for_run(run),
-                    tools=self.tools.specs(run["capabilities"]),
+                    tools=self._tool_specs_for_run(run),
                 )
-                self.store.record_run_step_decision(
+                heartbeat.assert_owned()
+                if self._apply_pending_control(
+                    event=event,
                     run_id=run_id,
-                    step=run["step_count"],
-                    decision=_decision_from_response(response),
-                    now=now,
-                )
+                    heartbeat=heartbeat,
+                ) is not None:
+                    return run_id
+                with self.store.active_claim_transaction(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=heartbeat.current_time,
+                    validate=heartbeat.assert_owned,
+                ) as transition_now:
+                    self.store.record_run_step_decision(
+                        run_id=run_id,
+                        step=run["step_count"],
+                        decision=_decision_from_response(response),
+                        now=transition_now,
+                    )
             else:
                 response = _response_from_decision(stored_decision)
+            heartbeat.assert_owned()
+            if self._apply_pending_control(
+                event=event,
+                run_id=run_id,
+                heartbeat=heartbeat,
+            ) is not None:
+                return run_id
             if response.tool_call is not None:
                 call = response.tool_call
-                self.store.record_run_message(
-                    run_id=run_id,
-                    role="assistant",
-                    content=(
-                        f"tool_call id={call.request_id} name={call.name} "
-                        f"arguments={json.dumps(call.arguments, sort_keys=True)}"
-                    ),
-                    now=now,
-                    message_key=f"step:{run['step_count']}:assistant-decision",
-                )
+                if call.name == AUTONOMOUS_TURN_TOOL_NAME:
+                    try:
+                        reason, delay_seconds = self._parse_autonomous_turn_request(
+                            call.arguments
+                        )
+                    except ValueError as exc:
+                        with self.store.active_claim_transaction(
+                            event.id,
+                            worker_id=self.worker_id,
+                            lease_token=event.lease_token,
+                            now=heartbeat.current_time,
+                            validate=heartbeat.assert_owned,
+                        ) as transition_now:
+                            self.store.update_run(
+                                run_id,
+                                now=transition_now,
+                                status="FAILED",
+                                last_error=f"invalid autonomous turn request: {exc}",
+                            )
+                            self.store.append_journal(
+                                event_type="AUTONOMOUS_TURN_DENIED",
+                                subject_id=run_id,
+                                payload={
+                                    "reason": "invalid_request",
+                                    "error": str(exc),
+                                },
+                                now=transition_now,
+                            )
+                            self.store.ack_event(
+                                event.id,
+                                worker_id=self.worker_id,
+                                lease_token=event.lease_token,
+                                now=transition_now,
+                            )
+                        return run_id
+                    with self.store.active_claim_transaction(
+                        event.id,
+                        worker_id=self.worker_id,
+                        lease_token=event.lease_token,
+                        now=heartbeat.current_time,
+                        validate=heartbeat.assert_owned,
+                    ) as transition_now:
+                        applied = self.store.apply_claimed_run_control(
+                            run_id=run_id,
+                            event_id=event.id,
+                            worker_id=self.worker_id,
+                            lease_token=event.lease_token,
+                            now=transition_now,
+                        )
+                        if applied is None:
+                            refreshed = self.store.get_run(run_id)
+                            if (
+                                refreshed["autonomous_turn_count"]
+                                >= self.max_autonomous_turns_per_run
+                            ):
+                                self.store.update_run(
+                                    run_id,
+                                    now=transition_now,
+                                    status="FAILED",
+                                    last_error="autonomous turn budget exceeded",
+                                )
+                                self.store.append_journal(
+                                    event_type="AUTONOMOUS_TURN_DENIED",
+                                    subject_id=run_id,
+                                    payload={
+                                        "reason": reason,
+                                        "limit": self.max_autonomous_turns_per_run,
+                                    },
+                                    now=transition_now,
+                                )
+                            else:
+                                self.store.record_run_message(
+                                    run_id=run_id,
+                                    role="assistant",
+                                    content=(
+                                        f"tool_call id={call.request_id} "
+                                        f"name={call.name} "
+                                        f"arguments={json.dumps(call.arguments, sort_keys=True)}"
+                                    ),
+                                    now=transition_now,
+                                    message_key=(
+                                        f"step:{run['step_count']}:assistant-decision"
+                                    ),
+                                )
+                                self.store.record_run_message(
+                                    run_id=run_id,
+                                    role="tool",
+                                    content=(
+                                        f"{AUTONOMOUS_TURN_TOOL_NAME} => "
+                                        + json.dumps(
+                                            {
+                                                "status": "scheduled",
+                                                "reason": reason,
+                                                "delay_seconds": delay_seconds,
+                                            },
+                                            sort_keys=True,
+                                        )
+                                    ),
+                                    now=transition_now,
+                                    message_key=f"step:{run['step_count']}:tool-result",
+                                )
+                                self.store.defer_run_for_autonomous_turn(
+                                    run_id=run_id,
+                                    expected_step=run["step_count"],
+                                    reason=reason,
+                                    delay_seconds=delay_seconds,
+                                    priority=event.priority,
+                                    now=transition_now,
+                                )
+                        self.store.ack_event(
+                            event.id,
+                            worker_id=self.worker_id,
+                            lease_token=event.lease_token,
+                            now=transition_now,
+                        )
+                    return run_id
+                with self.store.active_claim_transaction(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=heartbeat.current_time,
+                    validate=heartbeat.assert_owned,
+                ) as transition_now:
+                    self.store.record_run_message(
+                        run_id=run_id,
+                        role="assistant",
+                        content=(
+                            f"tool_call id={call.request_id} name={call.name} "
+                            f"arguments={json.dumps(call.arguments, sort_keys=True)}"
+                        ),
+                        now=transition_now,
+                        message_key=f"step:{run['step_count']}:assistant-decision",
+                    )
+                def before_tool_dispatch() -> None:
+                    heartbeat.assert_owned()
+                    if self._apply_pending_control(
+                        event=event,
+                        run_id=run_id,
+                        heartbeat=heartbeat,
+                    ) is not None:
+                        raise RunControlApplied()
+
+                def mutation_admission_guard() -> None:
+                    heartbeat.assert_owned()
+                    self.store.assert_active_claim(
+                        event.id,
+                        worker_id=self.worker_id,
+                        lease_token=event.lease_token or "",
+                        now=heartbeat.current_time(),
+                    )
+                    refreshed = self.store.get_run(run_id)
+                    if (
+                        refreshed["status"] == "RUNNING"
+                        and refreshed["control_action"] in {"PAUSE", "CANCEL"}
+                    ):
+                        raise RunControlApplied()
+
                 try:
                     result = self.tools.execute(
                         name=call.name,
@@ -232,70 +696,222 @@ class Engine:
                         request_id=call.request_id,
                         allowed_capabilities=run["capabilities"],
                         now=now,
+                        before_dispatch=before_tool_dispatch,
+                        admission_guard=mutation_admission_guard,
                     )
+                    heartbeat.assert_owned()
+                except RunControlApplied:
+                    refreshed = self.store.get_run(run_id)
+                    if (
+                        refreshed["status"] == "RUNNING"
+                        and refreshed["control_action"] in {"PAUSE", "CANCEL"}
+                    ):
+                        self._apply_pending_control(
+                            event=event,
+                            run_id=run_id,
+                            heartbeat=heartbeat,
+                        )
+                    return run_id
                 except BaseException as exc:
                     effect_state = self.tools.effect_state(call.request_id)
                     if effect_state in {"EXECUTING", "ATTEMPTED_UNKNOWN"}:
-                        self.store.block_run_on_effect(
-                            run_id=run_id,
-                            request_id=call.request_id,
-                            error=f"{type(exc).__name__}: {exc}",
-                            now=now,
-                        )
-                        self.store.ack_event(
-                            event.id, worker_id=self.worker_id, now=now
-                        )
+                        with self.store.active_claim_transaction(
+                            event.id,
+                            worker_id=self.worker_id,
+                            lease_token=event.lease_token,
+                            now=heartbeat.current_time,
+                            validate=heartbeat.assert_owned,
+                        ) as transition_now:
+                            self.store.block_run_on_effect(
+                                run_id=run_id,
+                                request_id=call.request_id,
+                                error=f"{type(exc).__name__}: {exc}",
+                                now=transition_now,
+                            )
+                            self.store.ack_event(
+                                event.id,
+                                worker_id=self.worker_id,
+                                lease_token=event.lease_token,
+                                now=transition_now,
+                            )
                         return run_id
                     if isinstance(exc, ToolError):
-                        self.store.update_run(
-                            run_id,
-                            now=now,
-                            status="FAILED",
-                            last_error=f"{type(exc).__name__}: {exc}",
-                        )
-                        self.store.ack_event(
-                            event.id, worker_id=self.worker_id, now=now
-                        )
+                        with self.store.active_claim_transaction(
+                            event.id,
+                            worker_id=self.worker_id,
+                            lease_token=event.lease_token,
+                            now=heartbeat.current_time,
+                            validate=heartbeat.assert_owned,
+                        ) as transition_now:
+                            self.store.update_run(
+                                run_id,
+                                now=transition_now,
+                                status="FAILED",
+                                last_error=f"{type(exc).__name__}: {exc}",
+                            )
+                            self.store.ack_event(
+                                event.id,
+                                worker_id=self.worker_id,
+                                lease_token=event.lease_token,
+                                now=transition_now,
+                            )
                         return run_id
                     raise
-                self.store.record_run_message(
-                    run_id=run_id,
-                    role="tool",
-                    content=f"{call.name} => {json.dumps(result.output, sort_keys=True)}",
-                    now=now,
-                    message_key=f"step:{run['step_count']}:tool-result",
-                )
-                self.store.advance_run_step(
-                    run_id=run_id,
-                    expected_step=run["step_count"],
-                    priority=event.priority,
-                    now=now,
-                )
+                with self.store.active_claim_transaction(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=heartbeat.current_time,
+                    validate=heartbeat.assert_owned,
+                ) as transition_now:
+                    self.store.record_run_message(
+                        run_id=run_id,
+                        role="tool",
+                        content=f"{call.name} => {json.dumps(result.output, sort_keys=True)}",
+                        now=transition_now,
+                        message_key=f"step:{run['step_count']}:tool-result",
+                    )
+                    applied = self.store.apply_claimed_run_control(
+                        run_id=run_id,
+                        event_id=event.id,
+                        worker_id=self.worker_id,
+                        lease_token=event.lease_token,
+                        now=transition_now,
+                        advance_step=True,
+                    )
+                    if applied is None:
+                        self.store.advance_run_step(
+                            run_id=run_id,
+                            expected_step=run["step_count"],
+                            priority=event.priority,
+                            now=transition_now,
+                        )
+                        self.store.ack_event(
+                            event.id,
+                            worker_id=self.worker_id,
+                            lease_token=event.lease_token,
+                            now=transition_now,
+                        )
+                return run_id
             else:
                 assert response.final_text is not None
-                self.store.record_run_message(
-                    run_id=run_id,
-                    role="assistant",
-                    content=response.final_text,
-                    now=now,
-                    message_key=f"step:{run['step_count']}:assistant-final",
-                )
+                with self.store.active_claim_transaction(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=heartbeat.current_time,
+                    validate=heartbeat.assert_owned,
+                ) as transition_now:
+                    applied = self.store.apply_claimed_run_control(
+                        run_id=run_id,
+                        event_id=event.id,
+                        worker_id=self.worker_id,
+                        lease_token=event.lease_token,
+                        now=transition_now,
+                    )
+                    if applied is None:
+                        self.store.record_run_message(
+                            run_id=run_id,
+                            role="assistant",
+                            content=response.final_text,
+                            now=transition_now,
+                            message_key=f"step:{run['step_count']}:assistant-final",
+                        )
+                        self.store.complete_run_step(
+                            run_id=run_id,
+                            expected_step=run["step_count"],
+                            final_text=response.final_text,
+                            now=transition_now,
+                        )
+                        self.store.ack_event(
+                            event.id,
+                            worker_id=self.worker_id,
+                            lease_token=event.lease_token,
+                            now=transition_now,
+                        )
+                return run_id
+        except RetryableModelError as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            transition_now = heartbeat.current_time()
+            retry_delay = _model_retry_delay_seconds(
+                event_id=event.id,
+                attempts=event.attempts,
+                retry_after_seconds=exc.retry_after_seconds,
+            )
+            dead_lettered = self.store.fail_event(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=transition_now,
+                retry_at=transition_now + retry_delay,
+                max_attempts=self.max_event_attempts,
+                error=error,
+                failed_run_id=run_id,
+            )
+            self.store.append_journal(
+                event_type=(
+                    "MODEL_FAILURE_DEAD_LETTERED"
+                    if dead_lettered
+                    else "MODEL_FAILURE_RETRY_SCHEDULED"
+                ),
+                subject_id=run_id,
+                payload={
+                    "event_id": event.id,
+                    "category": exc.category,
+                    "attempt": event.attempts,
+                    "retry_after_seconds": exc.retry_after_seconds,
+                    "retry_delay_seconds": retry_delay,
+                },
+                now=transition_now,
+            )
+            raise
+        except NonRetryableModelError as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            with self.store.active_claim_transaction(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time,
+                validate=heartbeat.assert_owned,
+            ) as transition_now:
                 self.store.update_run(
                     run_id,
-                    now=now,
-                    status="COMPLETED",
-                    final_text=response.final_text,
-                    clear_last_error=True,
-                    increment_step=True,
+                    now=transition_now,
+                    status="FAILED",
+                    last_error=error,
                 )
-            self.store.ack_event(event.id, worker_id=self.worker_id, now=now)
+                self.store.append_journal(
+                    event_type="MODEL_FAILURE_TERMINAL",
+                    subject_id=run_id,
+                    payload={
+                        "event_id": event.id,
+                        "error": error,
+                    },
+                    now=transition_now,
+                )
+                self.store.ack_event(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=transition_now,
+                )
             return run_id
+        except EventLeaseLost as exc:
+            raise LeaseLost(str(exc)) from exc
+        except LeaseLost:
+            raise
         except BaseException as exc:
-            self.store.update_run(run_id, now=now, last_error=f"{type(exc).__name__}: {exc}")
+            error = f"{type(exc).__name__}: {exc}"
+            transition_now = heartbeat.current_time()
             self.store.fail_event(
                 event.id,
                 worker_id=self.worker_id,
-                now=now,
-                retry_at=now + min(60.0, 2.0 ** min(event.attempts, 6)),
+                lease_token=event.lease_token,
+                now=transition_now,
+                retry_at=transition_now
+                + min(60.0, 2.0 ** min(event.attempts, 6)),
+                max_attempts=self.max_event_attempts,
+                error=error,
+                failed_run_id=run_id,
             )
             raise

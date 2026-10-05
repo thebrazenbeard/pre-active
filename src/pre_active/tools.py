@@ -281,6 +281,9 @@ class ToolRegistry:
         self._specs[spec.name] = spec
         self._handlers[spec.name] = handler
 
+    def has(self, name: str) -> bool:
+        return name in self._specs
+
     def specs(self, allowed_capabilities: set[str]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for name in sorted(self._specs):
@@ -312,6 +315,8 @@ class ToolRegistry:
         request_id: str,
         allowed_capabilities: set[str],
         now: float,
+        before_dispatch: Callable[[], None] | None = None,
+        admission_guard: Callable[[], None] | None = None,
     ) -> ToolExecution:
         if name not in self._specs:
             raise ToolError(f"unknown tool: {name}")
@@ -323,6 +328,8 @@ class ToolRegistry:
         request_digest = _sha256(request_payload)
 
         if not spec.mutation:
+            if before_dispatch is not None:
+                before_dispatch()
             output = self._handlers[name](arguments)
             result_json = _canonical_json(output)
             return ToolExecution(
@@ -333,63 +340,115 @@ class ToolRegistry:
                 result_sha256=_sha256(result_json),
             )
 
-        row = self.store.connection.execute(
+        def validate_existing(row: sqlite3.Row) -> None:
+            if row["request_sha256"] != request_digest or row["tool_name"] != name:
+                raise IdempotencyConflict(
+                    "request_id was already used for different input"
+                )
+
+        existing = self.store.connection.execute(
             "SELECT * FROM tool_effects WHERE request_id = ?", (request_id,)
         ).fetchone()
-        if row is not None:
-            if row["request_sha256"] != request_digest or row["tool_name"] != name:
-                raise IdempotencyConflict("request_id was already used for different input")
-            if row["state"] == "COMMITTED":
-                output = json.loads(row["result_json"])
+        if existing is not None:
+            validate_existing(existing)
+            if existing["state"] == "COMMITTED":
+                output = json.loads(existing["result_json"])
                 return ToolExecution(
                     request_id=request_id,
                     tool_name=name,
                     output=output,
                     replayed=True,
-                    result_sha256=str(row["result_sha256"]),
+                    result_sha256=str(existing["result_sha256"]),
                 )
-            if row["state"] == "RECONCILED_NO_EFFECT":
+            if existing["state"] != "RECONCILED_NO_EFFECT":
+                raise AmbiguousEffect(
+                    f"mutation request {request_id} is in unresolved state "
+                    f"{existing['state']}"
+                )
+
+        if before_dispatch is not None:
+            before_dispatch()
+
+        self.store.connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = self.store.connection.execute(
+                "SELECT * FROM tool_effects WHERE request_id = ?", (request_id,)
+            ).fetchone()
+            if current is not None:
+                validate_existing(current)
+                if current["state"] == "COMMITTED":
+                    output = json.loads(current["result_json"])
+                    result = ToolExecution(
+                        request_id=request_id,
+                        tool_name=name,
+                        output=output,
+                        replayed=True,
+                        result_sha256=str(current["result_sha256"]),
+                    )
+                    self.store.connection.execute("COMMIT")
+                    return result
+                if current["state"] != "RECONCILED_NO_EFFECT":
+                    raise AmbiguousEffect(
+                        f"mutation request {request_id} is in unresolved state "
+                        f"{current['state']}"
+                    )
+
+            if admission_guard is not None:
+                admission_guard()
+
+            if current is None:
                 self.store.connection.execute(
                     """
+                    INSERT INTO tool_effects (
+                        request_id, tool_name, request_sha256, request_json, state,
+                        result_json, result_sha256, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'EXECUTING', NULL, NULL, ?, ?)
+                    """,
+                    (request_id, name, request_digest, request_payload, now, now),
+                )
+            else:
+                cursor = self.store.connection.execute(
+                    """
                     UPDATE tool_effects
-                    SET state='EXECUTING', result_json=NULL, result_sha256=NULL, updated_at=?
-                    WHERE request_id=?
+                    SET state='EXECUTING', result_json=NULL, result_sha256=NULL,
+                        updated_at=?
+                    WHERE request_id=? AND state='RECONCILED_NO_EFFECT'
                     """,
                     (now, request_id),
                 )
-            else:
-                raise AmbiguousEffect(
-                    f"mutation request {request_id} is in unresolved state {row['state']}"
-                )
-        else:
-            self.store.connection.execute(
-                """
-                INSERT INTO tool_effects (
-                    request_id, tool_name, request_sha256, request_json, state,
-                    result_json, result_sha256, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'EXECUTING', NULL, NULL, ?, ?)
-                """,
-                (request_id, name, request_digest, request_payload, now, now),
-            )
+                if cursor.rowcount != 1:
+                    raise AmbiguousEffect(
+                        f"mutation request {request_id} changed during admission"
+                    )
+            self.store.connection.execute("COMMIT")
+        except BaseException:
+            self.store.connection.execute("ROLLBACK")
+            raise
+
         try:
             output = self._handlers[name](arguments)
         except BaseException:
             self.store.connection.execute(
-                "UPDATE tool_effects SET state='ATTEMPTED_UNKNOWN', updated_at=? WHERE request_id=?",
+                "UPDATE tool_effects SET state='ATTEMPTED_UNKNOWN', updated_at=? "
+                "WHERE request_id=? AND state='EXECUTING'",
                 (now, request_id),
             )
             raise
 
         result_json = _canonical_json(output)
         result_digest = _sha256(result_json)
-        self.store.connection.execute(
+        cursor = self.store.connection.execute(
             """
             UPDATE tool_effects
             SET state='COMMITTED', result_json=?, result_sha256=?, updated_at=?
-            WHERE request_id=?
+            WHERE request_id=? AND state='EXECUTING'
             """,
             (result_json, result_digest, now, request_id),
         )
+        if cursor.rowcount != 1:
+            raise AmbiguousEffect(
+                f"mutation request {request_id} lost EXECUTING state before commit"
+            )
         return ToolExecution(
             request_id=request_id,
             tool_name=name,
@@ -397,6 +456,7 @@ class ToolRegistry:
             replayed=False,
             result_sha256=result_digest,
         )
+
     def effect_state(self, request_id: str) -> str | None:
         row = self.store.connection.execute(
             "SELECT state FROM tool_effects WHERE request_id=?", (request_id,)
@@ -447,6 +507,7 @@ class ToolRegistry:
         evidence_digest: str,
         now: float,
         result: dict[str, Any] | None = None,
+        attempt_quiesced: bool = False,
     ) -> None:
         if len(evidence_digest) != 64 or any(
             ch not in "0123456789abcdefABCDEF" for ch in evidence_digest
@@ -460,6 +521,15 @@ class ToolRegistry:
         if row["state"] not in {"EXECUTING", "ATTEMPTED_UNKNOWN"}:
             raise ToolError(
                 f"mutation request {request_id} cannot be reconciled from state {row['state']}"
+            )
+        if (
+            not effect_occurred
+            and row["state"] == "EXECUTING"
+            and not attempt_quiesced
+        ):
+            raise ValueError(
+                "no-effect reconciliation from EXECUTING requires "
+                "attempt_quiesced=True"
             )
         if effect_occurred and result is None:
             raise ValueError("result is required when reconciliation confirms the effect")
@@ -475,6 +545,15 @@ class ToolRegistry:
             ).fetchone()
             if current is None or current["state"] not in {"EXECUTING", "ATTEMPTED_UNKNOWN"}:
                 raise ToolError("mutation state changed during reconciliation")
+            if (
+                not effect_occurred
+                and current["state"] == "EXECUTING"
+                and not attempt_quiesced
+            ):
+                raise ValueError(
+                    "no-effect reconciliation from EXECUTING requires "
+                    "attempt_quiesced=True"
+                )
             self.store.connection.execute(
                 """
                 INSERT INTO tool_reconciliations (

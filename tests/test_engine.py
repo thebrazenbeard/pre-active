@@ -1,7 +1,14 @@
 from pathlib import Path
 
 from pre_active.context import ContextAssembler
-from pre_active.engine import Engine, ModelResponse, ToolCall
+from pre_active.engine import (
+    Engine,
+    ModelResponse,
+    NonRetryableModelError,
+    RetryableModelError,
+    ToolCall,
+)
+from pre_active.lease import LeaseLost
 from pre_active.store import Store
 from pre_active.tools import ToolRegistry, ToolSpec
 
@@ -361,12 +368,14 @@ def test_task_requested_redelivery_reuses_the_same_run_after_pre_ack_crash(
     original_ack = store.ack_event
     crash_once = True
 
-    def crash_before_ack(event_id, *, worker_id, now):
+    def crash_before_ack(event_id, *, worker_id, lease_token, now):
         nonlocal crash_once
         if crash_once and event_id == source_event_id:
             crash_once = False
             raise RuntimeError("simulated crash before source-event ack")
-        return original_ack(event_id, worker_id=worker_id, now=now)
+        return original_ack(
+            event_id, worker_id=worker_id, lease_token=lease_token, now=now
+        )
 
     store.ack_event = crash_before_ack  # type: ignore[method-assign]
 
@@ -669,3 +678,348 @@ def test_successful_tool_step_clears_previous_provider_error(tmp_path: Path) -> 
     assert recovered["status"] == "RUNNING"
     assert recovered["step_count"] == 1
     assert recovered["last_error"] is None
+
+
+def test_long_model_call_keeps_event_lease_alive(tmp_path: Path) -> None:
+    import threading
+    import time
+
+    state = tmp_path / "state.db"
+    store = Store(state)
+    tools = ToolRegistry(store)
+    model_started = threading.Event()
+    release_model = threading.Event()
+
+    class SlowFinalModel:
+        def respond(self, *, messages, tools):
+            model_started.set()
+            assert release_model.wait(timeout=3.0)
+            return ModelResponse(final_text="slow but healthy")
+
+    engine = Engine(
+        store=store,
+        model=SlowFinalModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-primary",
+        lease_seconds=0.40,
+        lease_heartbeat_seconds=0.05,
+    )
+    run_id = engine.submit_task("slow model turn", set(), now=1.0)
+
+    competing_claims = []
+    contender_errors: list[BaseException] = []
+
+    def compete() -> None:
+        assert model_started.wait(timeout=2.0)
+        competitor = Store(state)
+        try:
+            deadline = time.monotonic() + 2.0
+            renewed_until = 0.0
+            while time.monotonic() < deadline:
+                row = competitor.connection.execute(
+                    "SELECT lease_until FROM events WHERE status='CLAIMED' LIMIT 1"
+                ).fetchone()
+                if row is not None and row["lease_until"] is not None:
+                    renewed_until = float(row["lease_until"])
+                    if renewed_until > 2.45:
+                        break
+                time.sleep(0.01)
+            assert renewed_until > 2.45
+
+            # Test beyond the original 2.40 lease expiry using the queue's
+            # explicit logical clock, not CI wall-clock timing.
+            competing_claims.append(
+                competitor.claim_event(
+                    worker_id="worker-secondary",
+                    now=2.41,
+                    lease_seconds=1.0,
+                )
+            )
+        except BaseException as exc:
+            contender_errors.append(exc)
+        finally:
+            competitor.close()
+            release_model.set()
+
+    contender = threading.Thread(target=compete)
+    contender.start()
+    result = engine.run_once(now=2.0)
+    contender.join(timeout=3.0)
+
+    assert not contender.is_alive()
+    assert contender_errors == []
+    assert result == run_id
+    assert competing_claims == [None]
+    assert store.get_run(run_id)["status"] == "COMPLETED"
+
+
+def test_retry_exhaustion_dead_letters_event_and_fails_run(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class AlwaysFailModel:
+        def respond(self, *, messages, tools):
+            raise RuntimeError("provider remains unavailable")
+
+    engine = Engine(
+        store=store,
+        model=AlwaysFailModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+        max_event_attempts=2,
+    )
+    run_id = engine.submit_task("eventually stop retrying", set(), now=1.0)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="provider remains unavailable"):
+        engine.run_once(now=2.0)
+    [first_event] = store.list_events(kind="run.step")
+    assert first_event["status"] == "PENDING"
+    assert store.get_run(run_id)["status"] == "RUNNING"
+
+    with pytest.raises(RuntimeError, match="provider remains unavailable"):
+        engine.run_once(now=5.0)
+
+    [dead_event] = store.list_events(kind="run.step")
+    assert dead_event["status"] == "DEAD"
+    assert dead_event["attempts"] == 2
+    assert "provider remains unavailable" in dead_event["last_error"]
+    run = store.get_run(run_id)
+    assert run["status"] == "FAILED"
+    assert "provider remains unavailable" in run["last_error"]
+
+
+def test_lease_extension_ceiling_blocks_stale_model_decision_persistence(tmp_path: Path) -> None:
+    import time
+    import pytest
+
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class TooSlowModel:
+        def respond(self, *, messages, tools):
+            time.sleep(0.35)
+            return ModelResponse(final_text="late response")
+
+    engine = Engine(
+        store=store,
+        model=TooSlowModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+        lease_seconds=1.0,
+        lease_heartbeat_seconds=0.05,
+        max_lease_extension_seconds=0.15,
+    )
+    run_id = engine.submit_task("do not persist stale decision", set(), now=time.time())
+
+    with pytest.raises(LeaseLost, match="maximum lease extension elapsed"):
+        engine.run_once(now=time.time())
+
+    assert store.get_run_step_decision(run_id=run_id, step=0) is None
+    run = store.get_run(run_id)
+    assert run["status"] == "RUNNING"
+    assert run["last_error"] is None
+
+
+def test_final_progress_is_not_committed_after_claim_expires_during_persistence(
+    tmp_path: Path,
+) -> None:
+    import time
+    import pytest
+
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class FinalModel:
+        def respond(self, *, messages, tools):
+            return ModelResponse(final_text="must not commit stale")
+
+    engine = Engine(
+        store=store,
+        model=FinalModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+        lease_seconds=0.20,
+        lease_heartbeat_seconds=0.05,
+        max_lease_extension_seconds=0.12,
+    )
+    run_id = engine.submit_task("fence final commit", set(), now=time.time())
+
+    original_record = store.record_run_message
+
+    def delay_final_persistence(*, run_id, role, content, now, message_key=None):
+        if role == "assistant" and content == "must not commit stale":
+            time.sleep(0.35)
+        return original_record(
+            run_id=run_id,
+            role=role,
+            content=content,
+            now=now,
+            message_key=message_key,
+        )
+
+    store.record_run_message = delay_final_persistence  # type: ignore[method-assign]
+
+    with pytest.raises((LeaseLost, RuntimeError)):
+        engine.run_once(now=time.time())
+
+    run = store.get_run(run_id)
+    assert run["status"] == "RUNNING"
+    assert run["step_count"] == 0
+    assert run["final_text"] is None
+
+
+def test_model_error_contract_distinguishes_retryable_and_permanent_failures() -> None:
+    import pre_active.engine as engine_module
+
+    assert hasattr(engine_module, "RetryableModelError")
+    assert hasattr(engine_module, "NonRetryableModelError")
+
+    retryable = engine_module.RetryableModelError(
+        "rate limited",
+        category="throttling",
+        retry_after_seconds=12.0,
+    )
+    assert retryable.category == "throttling"
+    assert retryable.retry_after_seconds == 12.0
+    assert isinstance(engine_module.NonRetryableModelError("bad auth"), RuntimeError)
+
+
+def test_non_retryable_model_error_fails_run_and_consumes_event(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class BadAuthModel:
+        def respond(self, *, messages, tools):
+            raise NonRetryableModelError("provider authentication rejected")
+
+    engine = Engine(
+        store=store,
+        model=BadAuthModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+    )
+    run_id = engine.submit_task("do not churn on bad auth", set(), now=1.0)
+
+    assert engine.run_once(now=2.0) == run_id
+
+    run = store.get_run(run_id)
+    assert run["status"] == "FAILED"
+    assert "NonRetryableModelError" in run["last_error"]
+    [event] = store.list_events(kind="run.step")
+    assert event["status"] == "DONE"
+    assert event["attempts"] == 1
+    assert store.pending_event_count() == 0
+    assert any(
+        entry["event_type"] == "MODEL_FAILURE_TERMINAL"
+        for entry in store.list_journal(subject_id=run_id)
+    )
+
+
+def test_retryable_model_error_keeps_run_pending_for_retry(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class ThrottledModel:
+        def respond(self, *, messages, tools):
+            raise RetryableModelError(
+                "provider throttled",
+                category="throttling",
+                retry_after_seconds=12.0,
+            )
+
+    engine = Engine(
+        store=store,
+        model=ThrottledModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+        max_event_attempts=4,
+    )
+    run_id = engine.submit_task("retry after throttle", set(), now=1.0)
+
+    import pytest
+
+    with pytest.raises(RetryableModelError, match="provider throttled"):
+        engine.run_once(now=2.0)
+
+    run = store.get_run(run_id)
+    assert run["status"] == "RUNNING"
+    assert "RetryableModelError" in run["last_error"]
+    [event] = store.list_events(kind="run.step")
+    assert event["status"] == "PENDING"
+    assert event["attempts"] == 1
+
+
+def test_retryable_model_error_honors_retry_after_as_minimum_delay(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    tools = ToolRegistry(store)
+
+    class BusyModel:
+        def respond(self, *, messages, tools):
+            raise RetryableModelError(
+                "come back later",
+                category="throttling",
+                retry_after_seconds=12.0,
+            )
+
+    engine = Engine(
+        store=store,
+        model=BusyModel(),
+        tools=tools,
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="worker-1",
+    )
+    engine.submit_task("respect retry-after", set(), now=1.0)
+
+    import pytest
+
+    with pytest.raises(RetryableModelError):
+        engine.run_once(now=2.0)
+
+    row = store.connection.execute(
+        "SELECT available_at, attempts FROM events WHERE kind='run.step'"
+    ).fetchone()
+    assert row is not None
+    assert row["attempts"] == 1
+    assert 14.0 <= row["available_at"] < 15.0
+
+
+def test_retryable_model_backoff_adds_stable_subsecond_jitter() -> None:
+    import pre_active.engine as engine_module
+
+    assert hasattr(engine_module, "_model_retry_delay_seconds")
+
+    first = engine_module._model_retry_delay_seconds(
+        event_id="event-a",
+        attempts=1,
+        retry_after_seconds=None,
+    )
+    repeated = engine_module._model_retry_delay_seconds(
+        event_id="event-a",
+        attempts=1,
+        retry_after_seconds=None,
+    )
+    other = engine_module._model_retry_delay_seconds(
+        event_id="event-b",
+        attempts=1,
+        retry_after_seconds=None,
+    )
+
+    assert first == repeated
+    assert 2.0 <= first < 3.0
+    assert 2.0 <= other < 3.0
+    assert first != other
