@@ -4,7 +4,9 @@ Status: private control-surface candidate.
 
 The repository contains an installable ChatGPT plugin package under
 `plugin/pre-active/`. The plugin is intentionally a control and diagnostic
-surface over the real host-side runtime; it is not a second execution engine.
+surface over the real host-side continuous runtime; it is not a second execution engine.
+
+The control surface preserves Pre-Active's defining autonomy semantics: a user prompt is only one possible cause of a model turn, promptless turns may be granted by authorized observation/time/open-loop/endogenous sources, and autonomous cognition never manufactures effect authority.
 
 ## Transport
 

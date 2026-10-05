@@ -45,3 +45,14 @@ def test_plugin_runtime_reference_is_packaged() -> None:
     assert r"C:\ProgramData\PreActive" in text
     assert r"C:\ProgramData\PreActive\state\state.db" in text
     assert "status response" in text
+
+
+def test_plugin_preserves_autonomous_turn_semantics() -> None:
+    skill = PLUGIN / "skills" / "pre-active" / "SKILL.md"
+    text = skill.read_text(encoding="utf-8")
+    assert "USER_PROMPT != MODEL_TURN" in text
+    assert "CONTINUOUS_RUNTIME != CONTINUOUS_INFERENCE" in text
+    assert "AUTONOMOUS_TURN != CAPABILITY_GRANT != EFFECT_AUTHORITY" in text
+    assert "pre_active.request_turn" in text
+    assert "WAITING" in text
+    assert "does not by itself install or authorize an observer" in text

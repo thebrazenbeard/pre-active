@@ -28,7 +28,9 @@ If the expected root is absent but a model endpoint or legacy daemon is active, 
 
 ## Safe status semantics
 
-A status response may establish durable queue/run state. It does not establish that:
+A status response may establish durable queue/run state, including `WAITING` runs that have scheduled future cognition. `WAITING` means another turn is durably pending; it does not mean the model is currently inferring.
+
+A status response does not establish that:
 
 - a model backend is healthy unless checked separately;
 - a daemon is alive unless checked separately;

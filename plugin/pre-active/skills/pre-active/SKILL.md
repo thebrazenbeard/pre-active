@@ -5,10 +5,13 @@ description: Use when the user selects or mentions Pre-Active, asks to inspect, 
 
 # Pre-Active control surface
 
-Treat Pre-Active as a host-side durable execution runtime, not as model consciousness or a claim that ChatGPT itself is running in the background.
+Treat Pre-Active as a continuous resident runtime whose defining purpose is to let an LLM receive justified cognition turns without requiring a human prompt for every turn. The runtime may continuously monitor authorized observation sources and grant promptless turns from external change, time, actionable open loops, or model-requested re-entry. This is not model consciousness or a claim that ChatGPT itself is running when the host runtime is absent.
 
 ## Core invariants
 
+- `USER_PROMPT != MODEL_TURN`
+- `CONTINUOUS_RUNTIME != CONTINUOUS_INFERENCE`
+- `AUTONOMOUS_TURN != CAPABILITY_GRANT != EFFECT_AUTHORITY`
 - `REQUEST != AUTHORITY != ATTEMPT != EFFECT != VERIFIED EFFECT`
 - `QUEUED != RUNNING != COMPLETED != VERIFIED EXTERNAL EFFECT`
 - Loading this skill does not prove a daemon is running.
@@ -32,9 +35,17 @@ See [references/RUNTIME_CONTRACT.md](references/RUNTIME_CONTRACT.md).
 
 For status, diagnostics, queue inspection, run inspection, model-endpoint checks, process inspection, and logs, use read-only workstation actions directly when the user asks. Do not restart, kill, install, rewrite, register, migrate, or delete anything merely to make a diagnostic cleaner.
 
+## Autonomous turns
+
+A promptless model turn may come from `EXTERNAL`, `TEMPORAL`, `OPEN_LOOP`, or `ENDOGENOUS` runtime state. Preserve that source and its reason; do not rewrite an operator-created turn as model initiative or vice versa.
+
+The reserved `pre_active.request_turn` primitive is internal cognition control. It preserves the same run and capability set and schedules another model turn; it does not authorize a new external effect. A `WAITING` run is still operator-controllable and may be paused or cancelled before its future turn matures.
+
+When a user asks to grant a model turn directly, use the installed runtime's `autonomous-turn` surface only after the real state path/runtime binding is established. A request to monitor a new source does not by itself install or authorize an observer for that source.
+
 ## Durable writes
 
-A direct request to submit, schedule, or remember durable work authorizes that exact Pre-Active state mutation when the target runtime and state database have been verified. Preserve the user's requested task and capabilities literally.
+A direct request to submit, schedule, remember durable work, or grant an autonomous turn authorizes only that exact Pre-Active state mutation when the target runtime and state database have been verified. Preserve the requested task, source, reason, and capabilities literally.
 
 Do not infer permission for broader workstation effects from a request to queue work.
 

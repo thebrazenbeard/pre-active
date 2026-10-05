@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "pre-active",
   "version": "0.1.0",
-  "description": "ChatGPT control and diagnostic surface for the Pre-Active durable execution runtime.",
+  "description": "ChatGPT control and diagnostic surface for the Pre-Active continuous resident LLM runtime.",
   "author": {
     "name": "Patrick Sims",
     "url": "https://github.com/thebrazenbeard"
@@ -11,8 +11,8 @@
     "com.openai": {
       "interface": {
         "displayName": "Pre-Active",
-        "shortDescription": "Durable runtime control",
-        "longDescription": "Inspect, submit, schedule, and safely operate Pre-Active durable work through a verified workstation runtime. The plugin preserves effect boundaries and never treats queued work as proof of an external effect.",
+        "shortDescription": "Autonomous runtime control",
+        "longDescription": "Inspect, observe, grant autonomous model turns, schedule, and safely operate Pre-Active through a verified continuous resident runtime. The plugin preserves effect boundaries: initiative and promptless cognition never manufacture external-effect authority.",
         "developerName": "Patrick Sims",
         "category": "Productivity",
         "capabilities": ["Interactive"],
