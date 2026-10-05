@@ -211,7 +211,7 @@ class ObserverManager:
             "kind": str(row["kind"]),
             "config": json.loads(row["config_json"]),
             "task": str(row["task"]),
-            "capabilities": set(json.loads(row["capabilities_json"])),
+            "capabilities": list(json.loads(row["capabilities_json"])),
             "priority": int(row["priority"]),
             "interval_seconds": float(row["interval_seconds"]),
             "next_at": float(row["next_at"]),
