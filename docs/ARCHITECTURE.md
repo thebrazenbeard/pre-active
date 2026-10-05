@@ -87,6 +87,24 @@ If a PAUSE request is still pending on a `RUNNING` run and has not reached a saf
 
 `max_steps` bounds runaway tool/reasoning cycles. `max_autonomous_turns_per_run` bounds total model-requested future cognition across a run; the default is 16. `max_consecutive_endogenous_turns` separately bounds uninterrupted self-generated dialogue depth; the default is 2. At that depth the reserved re-entry tool is withheld, and an unadvertised attempt to call it fails closed. `max_event_attempts` bounds transient infrastructure retry loops; its default is also 16 attempts.
 
+### Verified progress ledger
+
+Task progress is not inferred from transcript length, model confidence, or the mere existence of a tool result.
+
+The progress ledger records immutable candidate evidence against an exact run and step:
+
+    CANDIDATE -> VERIFIED
+              -> REJECTED
+
+A producer may submit a candidate, but only an explicit verifier transition can create trusted progress. Verification and rejection record verifier identity and reason. Terminal decisions are immutable; reconsideration creates a new candidate rather than rewriting history.
+
+This yields a second truth boundary beside the effect ledger:
+
+    ATTEMPT != EVIDENCE != VERIFIED PROGRESS != COMPLETION
+    MODEL CLAIM != VERIFIED PROGRESS
+
+The ledger is currently a primitive, not an automatic completion policy. Later consumers may use VERIFIED checkpoints for context reconstruction, completion gates, version-safe continuation, and no-progress circuit breaking. See `docs/VERIFIED_PROGRESS.md`.
+
 ### Context assembler
 
 `pre_active.context.ContextAssembler` applies a strict character budget. It preserves the system instruction and current task before optional durable memory. Memory is selected by simple lexical relevance plus stored salience. V1 deliberately keeps this selection deterministic and inspectable rather than hiding retrieval behind an opaque agent framework.

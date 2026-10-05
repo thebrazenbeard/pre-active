@@ -76,6 +76,23 @@ CREATE TABLE IF NOT EXISTS run_step_decisions (
     created_at REAL NOT NULL,
     PRIMARY KEY (run_id, step)
 );
+CREATE TABLE IF NOT EXISTS progress_checkpoints (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step INTEGER NOT NULL CHECK (step >= 0),
+    state TEXT NOT NULL CHECK (state IN ('CANDIDATE', 'VERIFIED', 'REJECTED')),
+    summary TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    producer TEXT NOT NULL,
+    verifier TEXT,
+    decision_reason TEXT,
+    created_at REAL NOT NULL,
+    decided_at REAL
+);
+CREATE INDEX IF NOT EXISTS progress_checkpoints_run_idx
+ON progress_checkpoints(run_id, created_at, id);
+CREATE INDEX IF NOT EXISTS progress_checkpoints_state_idx
+ON progress_checkpoints(state, created_at, id);
 CREATE TABLE IF NOT EXISTS schedules (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,

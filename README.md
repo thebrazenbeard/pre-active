@@ -31,6 +31,7 @@ See [docs/AUTONOMOUS_RUNTIME.md](docs/AUTONOMOUS_RUNTIME.md) for the autonomous-
 - Bounded retry with configurable attempt ceilings, durable `DEAD` state, failure evidence, dead-letter inspection, and explicit single-event redrive.
 - Interval schedules that emit idempotent events.
 - Durable runs and idempotently keyed run transcripts across model turns.
+- Durable progress checkpoints with explicit `CANDIDATE -> VERIFIED | REJECTED` transitions, preserving the distinction between evidence and trusted progress.
 - Promptless `autonomous.turn` events classified as `EXTERNAL`, `TEMPORAL`, `OPEN_LOOP`, or `ENDOGENOUS`.
 - Reserved `pre_active.request_turn` support so a model can put its own durable run into `WAITING` and receive a later cognition turn without a new human prompt.
 - Bounded per-run autonomous-turn budgets to stop recursive self-stimulation from becoming an unbounded inference loop.
@@ -102,7 +103,7 @@ If a mutation handler loses its response after dispatch, Pre-Active records `ATT
   +------------------+
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/EFFECT_AND_RECOVERY.md](docs/EFFECT_AND_RECOVERY.md).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/EFFECT_AND_RECOVERY.md](docs/EFFECT_AND_RECOVERY.md), and [docs/VERIFIED_PROGRESS.md](docs/VERIFIED_PROGRESS.md).
 
 ## Portfolio-derived design
 

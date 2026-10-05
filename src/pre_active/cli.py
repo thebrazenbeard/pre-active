@@ -18,6 +18,7 @@ from .model_targets import (
     resolve_model_target,
 )
 from .providers.openai_compatible import OpenAICompatibleAdapter
+from .progress import ProgressLedger
 from .scheduler import Scheduler
 from .store import Store
 from .tools import ToolRegistry
@@ -147,6 +148,57 @@ def build_parser() -> argparse.ArgumentParser:
     target_probe.add_argument("name", nargs="?")
     target_probe.add_argument("--timeout", type=float, default=5.0)
 
+    checkpoint = sub.add_parser(
+        "checkpoint",
+        help="record and verify durable task-progress evidence",
+    )
+    checkpoint_sub = checkpoint.add_subparsers(
+        dest="checkpoint_command",
+        required=True,
+    )
+
+    checkpoint_add = checkpoint_sub.add_parser(
+        "add",
+        help="record candidate progress evidence for a run",
+    )
+    checkpoint_add.add_argument("run_id")
+    checkpoint_add.add_argument("summary")
+    checkpoint_add.add_argument("--step", type=int)
+    checkpoint_add.add_argument("--producer", default="operator")
+    checkpoint_add.add_argument("--evidence-json", default="{}")
+
+    checkpoint_list = checkpoint_sub.add_parser(
+        "list",
+        help="list progress checkpoints for a run",
+    )
+    checkpoint_list.add_argument("run_id")
+    checkpoint_list.add_argument(
+        "--state",
+        dest="checkpoint_state",
+        choices=["CANDIDATE", "VERIFIED", "REJECTED"],
+    )
+    checkpoint_list.add_argument(
+        "--trusted",
+        action="store_true",
+        help="show only VERIFIED progress",
+    )
+
+    checkpoint_verify = checkpoint_sub.add_parser(
+        "verify",
+        help="promote one candidate checkpoint to VERIFIED",
+    )
+    checkpoint_verify.add_argument("checkpoint_id")
+    checkpoint_verify.add_argument("--verifier", required=True)
+    checkpoint_verify.add_argument("--reason", required=True)
+
+    checkpoint_reject = checkpoint_sub.add_parser(
+        "reject",
+        help="mark one candidate checkpoint REJECTED",
+    )
+    checkpoint_reject.add_argument("checkpoint_id")
+    checkpoint_reject.add_argument("--verifier", required=True)
+    checkpoint_reject.add_argument("--reason", required=True)
+
     memory = sub.add_parser("remember", help="add durable context memory")
     memory.add_argument("content")
     memory.add_argument("--kind", default="semantic")
@@ -254,6 +306,71 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.command == "checkpoint":
+            ledger = ProgressLedger(store)
+            if args.checkpoint_command == "add":
+                try:
+                    evidence = json.loads(args.evidence_json)
+                except json.JSONDecodeError as exc:
+                    raise SystemExit("--evidence-json must be valid JSON") from exc
+                if not isinstance(evidence, dict):
+                    raise SystemExit("--evidence-json must decode to a JSON object")
+                run = store.get_run(args.run_id)
+                step = run["step_count"] if args.step is None else args.step
+                checkpoint_id = ledger.add_candidate(
+                    run_id=args.run_id,
+                    step=step,
+                    summary=args.summary,
+                    evidence=evidence,
+                    producer=args.producer,
+                    now=now,
+                )
+                print(
+                    json.dumps(
+                        ledger.get(checkpoint_id),
+                        sort_keys=True,
+                    )
+                )
+                return 0
+            if args.checkpoint_command == "list":
+                if args.trusted and args.checkpoint_state is not None:
+                    raise SystemExit("--trusted cannot be combined with --state")
+                checkpoints = (
+                    ledger.trusted(run_id=args.run_id)
+                    if args.trusted
+                    else ledger.list(
+                        run_id=args.run_id,
+                        state=args.checkpoint_state,
+                    )
+                )
+                print(
+                    json.dumps(
+                        {"checkpoints": checkpoints},
+                        sort_keys=True,
+                    )
+                )
+                return 0
+            if args.checkpoint_command in {"verify", "reject"}:
+                decision = (
+                    "VERIFIED"
+                    if args.checkpoint_command == "verify"
+                    else "REJECTED"
+                )
+                ledger.decide(
+                    args.checkpoint_id,
+                    decision=decision,
+                    verifier=args.verifier,
+                    reason=args.reason,
+                    now=now,
+                )
+                print(
+                    json.dumps(
+                        ledger.get(args.checkpoint_id),
+                        sort_keys=True,
+                    )
+                )
+                return 0
+            raise AssertionError(args.checkpoint_command)
         if args.command == "target":
             if args.target_command == "set":
                 target = ModelTarget(
