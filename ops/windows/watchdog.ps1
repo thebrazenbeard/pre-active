@@ -3,7 +3,12 @@ $ErrorActionPreference = "Stop"
 $root = if ($env:PRE_ACTIVE_ROOT) { $env:PRE_ACTIVE_ROOT } else { "C:\ProgramData\PreActive" }
 $log = Join-Path $root "logs\watchdog.log"
 
-foreach ($name in @("PreActive Qwen Endpoint", "PreActive Daemon")) {
+$names = @("PreActive Daemon")
+if (Get-ScheduledTask -TaskName "PreActive Qwen Endpoint" -ErrorAction SilentlyContinue) {
+    $names += "PreActive Qwen Endpoint"
+}
+
+foreach ($name in $names) {
     try {
         $task = Get-ScheduledTask -TaskName $name -ErrorAction Stop
         if ($task.State -ne "Running") {

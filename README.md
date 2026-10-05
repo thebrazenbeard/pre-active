@@ -39,6 +39,7 @@ See [docs/AUTONOMOUS_RUNTIME.md](docs/AUTONOMOUS_RUNTIME.md) for the autonomous-
 - Per-step durable model-decision fencing before any tool dispatch.
 - Salience/relevance-based memory selection under a bounded context budget.
 - A provider-neutral model interface plus a minimal OpenAI-compatible adapter.
+- Durable named local-model targets: the user selects which loopback OpenAI-compatible endpoint/model Pre-Active treats as its active cognitive target, without coupling the runtime to Qwen or any other specific model host.
 - Typed provider failure semantics: known transient transport/HTTP failures retry with bounded backoff, stable jitter, and `Retry-After` support; known permanent client/protocol failures fail fast instead of burning the queue retry budget.
 - Structured tool admission by explicit capability and a fail-closed JSON-Schema-compatible validation subset.
 - Exactly one admitted tool call per model turn for deterministic effect ordering.
@@ -140,13 +141,21 @@ pre-active --state .pre-active/state.db submit \
 
 Run one cycle against an OpenAI-compatible chat-completions endpoint:
 
-```bash
-export PRE_ACTIVE_BASE_URL="http://localhost:11434/v1"
-export PRE_ACTIVE_MODEL="your-model"
-# export PRE_ACTIVE_API_KEY="..."  # only when your endpoint requires one
+Define the local model that Pre-Active should use as its cognitive target, then activate it:
 
+```bash
+pre-active --state .pre-active/state.db target set local-primary \
+  --base-url "http://127.0.0.1:11434/v1" \
+  --model "your-local-model" \
+  --activate
+
+pre-active --state .pre-active/state.db target probe
 pre-active --state .pre-active/state.db run-once
 ```
+
+Targets are loopback-only in V1. The target stores endpoint identity and an optional **environment-variable name** for a key; it never stores the key itself. Change models with `target activate <name>` rather than rewriting the daemon.
+
+For backward compatibility, `PRE_ACTIVE_BASE_URL` and `PRE_ACTIVE_MODEL` are still accepted when no persisted target exists. Explicit `--base-url/--model` remains a one-run override.
 
 Run continuously:
 

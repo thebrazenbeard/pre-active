@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pre-active"
 version = "0.1.0"
-description = "Durable continuous execution environment for tool-using language models"
+description = "Continuous resident runtime for self-initiating language models with user-defined local model targets"
 requires-python = ">=3.11"
 authors = [{name = "Patrick Sims"}]
 license = {text = "Source-available proprietary; see LICENSE"}
