@@ -8,25 +8,6 @@ from typing import Any
 from .store import Store
 
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS progress_checkpoints (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    step INTEGER NOT NULL,
-    state TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    evidence_json TEXT NOT NULL,
-    producer TEXT NOT NULL,
-    verifier TEXT,
-    decision_reason TEXT,
-    created_at REAL NOT NULL,
-    decided_at REAL
-);
-CREATE INDEX IF NOT EXISTS progress_checkpoints_run_idx
-ON progress_checkpoints(run_id, created_at, id);
-CREATE INDEX IF NOT EXISTS progress_checkpoints_state_idx
-ON progress_checkpoints(state, created_at, id);
-"""
 
 
 class ProgressLedger:
@@ -42,7 +23,6 @@ class ProgressLedger:
     def __init__(self, store: Store) -> None:
         self.store = store
         self.connection = store.connection
-        self.connection.executescript(_SCHEMA)
 
     @staticmethod
     def _require_text(value: str, field: str) -> str:
@@ -134,7 +114,7 @@ class ProgressLedger:
         try:
             row = self.connection.execute(
                 """
-                SELECT run_id, state, step
+                SELECT run_id, state, step, verifier, decision_reason
                 FROM progress_checkpoints
                 WHERE id=?
                 """,
@@ -144,6 +124,13 @@ class ProgressLedger:
                 raise KeyError(checkpoint_id)
             current_state = str(row["state"])
             if current_state != "CANDIDATE":
+                if (
+                    current_state == normalized_decision
+                    and row["verifier"] == normalized_verifier
+                    and row["decision_reason"] == normalized_reason
+                ):
+                    self.connection.execute("COMMIT")
+                    return
                 raise RuntimeError(
                     f"checkpoint decision is immutable after {current_state}"
                 )
