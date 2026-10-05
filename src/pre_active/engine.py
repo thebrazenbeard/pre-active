@@ -83,7 +83,9 @@ AUTONOMOUS_TURN_TOOL_SPEC: dict[str, Any] = {
     "description": (
         "Request a future autonomous cognition turn without a human prompt. "
         "This schedules another model turn for the same durable run and preserves "
-        "the run's existing capabilities; it grants no new effect authority."
+        "the run's existing capabilities; it grants no new effect authority. "
+        "Use it only when another cognition turn has a concrete purpose. "
+        "Endogenous re-entry chains are runtime-bounded."
     ),
     "input_schema": {
         "type": "object",
@@ -154,6 +156,7 @@ class Engine:
         max_event_attempts: int = 16,
         max_steps: int = 24,
         max_autonomous_turns_per_run: int = 16,
+        max_consecutive_endogenous_turns: int = 2,
     ) -> None:
         self.store = store
         self.model = model
@@ -175,6 +178,11 @@ class Engine:
         if max_autonomous_turns_per_run < 0:
             raise ValueError("max_autonomous_turns_per_run must be >= 0")
         self.max_autonomous_turns_per_run = int(max_autonomous_turns_per_run)
+        if max_consecutive_endogenous_turns < 0:
+            raise ValueError("max_consecutive_endogenous_turns must be >= 0")
+        self.max_consecutive_endogenous_turns = int(
+            max_consecutive_endogenous_turns
+        )
 
     def submit_task(
         self,
@@ -192,11 +200,27 @@ class Engine:
             priority=0,
         )
 
-    def _tool_specs_for_run(self, run: dict[str, Any]) -> list[dict[str, Any]]:
-        return [
-            *self.tools.specs(run["capabilities"]),
-            dict(AUTONOMOUS_TURN_TOOL_SPEC),
-        ]
+    def _tool_specs_for_run(
+        self,
+        run: dict[str, Any],
+        *,
+        allow_autonomous_reentry: bool,
+    ) -> list[dict[str, Any]]:
+        specs = list(self.tools.specs(run["capabilities"]))
+        if allow_autonomous_reentry:
+            specs.append(dict(AUTONOMOUS_TURN_TOOL_SPEC))
+        return specs
+
+    def _endogenous_depth(self, event: Event) -> int:
+        if (
+            event.payload.get("autonomous") is not True
+            or event.payload.get("source") != "ENDOGENOUS"
+        ):
+            return 0
+        raw = event.payload.get("endogenous_depth", 1)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+            raise RuntimeError("endogenous run.step has invalid endogenous_depth")
+        return raw
 
     def _parse_autonomous_turn_request(
         self, arguments: dict[str, Any]
@@ -493,13 +517,20 @@ class Engine:
             return run_id
 
         try:
+            endogenous_depth = self._endogenous_depth(event)
+            allow_autonomous_reentry = (
+                endogenous_depth < self.max_consecutive_endogenous_turns
+            )
             stored_decision = self.store.get_run_step_decision(
                 run_id=run_id, step=run["step_count"]
             )
             if stored_decision is None:
                 response = self.model.respond(
                     messages=self._messages_for_run(run),
-                    tools=self._tool_specs_for_run(run),
+                    tools=self._tool_specs_for_run(
+                        run,
+                        allow_autonomous_reentry=allow_autonomous_reentry,
+                    ),
                 )
                 heartbeat.assert_owned()
                 if self._apply_pending_control(
@@ -533,6 +564,37 @@ class Engine:
             if response.tool_call is not None:
                 call = response.tool_call
                 if call.name == AUTONOMOUS_TURN_TOOL_NAME:
+                    if not allow_autonomous_reentry:
+                        with self.store.active_claim_transaction(
+                            event.id,
+                            worker_id=self.worker_id,
+                            lease_token=event.lease_token,
+                            now=heartbeat.current_time,
+                            validate=heartbeat.assert_owned,
+                        ) as transition_now:
+                            self.store.update_run(
+                                run_id,
+                                now=transition_now,
+                                status="FAILED",
+                                last_error="autonomous re-entry chain limit reached",
+                            )
+                            self.store.append_journal(
+                                event_type="AUTONOMOUS_TURN_DENIED",
+                                subject_id=run_id,
+                                payload={
+                                    "reason": "endogenous_chain_limit",
+                                    "endogenous_depth": endogenous_depth,
+                                    "limit": self.max_consecutive_endogenous_turns,
+                                },
+                                now=transition_now,
+                            )
+                            self.store.ack_event(
+                                event.id,
+                                worker_id=self.worker_id,
+                                lease_token=event.lease_token,
+                                now=transition_now,
+                            )
+                        return run_id
                     try:
                         reason, delay_seconds = self._parse_autonomous_turn_request(
                             call.arguments
@@ -640,6 +702,7 @@ class Engine:
                                     delay_seconds=delay_seconds,
                                     priority=event.priority,
                                     now=transition_now,
+                                    endogenous_depth=endogenous_depth + 1,
                                 )
                         self.store.ack_event(
                             event.id,

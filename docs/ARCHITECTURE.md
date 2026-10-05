@@ -85,7 +85,7 @@ A cancel request does not terminate a worker process or prove an already-dispatc
 
 If a PAUSE request is still pending on a `RUNNING` run and has not reached a safe boundary, `resume` may atomically withdraw that pending PAUSE without disturbing the current event. A pending CANCEL cannot be withdrawn through resume.
 
-`max_steps` bounds runaway tool/reasoning cycles. `max_autonomous_turns_per_run` separately bounds model-requested future cognition so a run cannot recursively self-stimulate forever; the default is 16 autonomous re-entries. `max_event_attempts` bounds transient infrastructure retry loops; its default is also 16 attempts.
+`max_steps` bounds runaway tool/reasoning cycles. `max_autonomous_turns_per_run` bounds total model-requested future cognition across a run; the default is 16. `max_consecutive_endogenous_turns` separately bounds uninterrupted self-generated dialogue depth; the default is 2. At that depth the reserved re-entry tool is withheld, and an unadvertised attempt to call it fails closed. `max_event_attempts` bounds transient infrastructure retry loops; its default is also 16 attempts.
 
 ### Context assembler
 
