@@ -174,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint_list.add_argument("run_id")
     checkpoint_list.add_argument(
         "--state",
+        dest="checkpoint_state",
         choices=["CANDIDATE", "VERIFIED", "REJECTED"],
     )
     checkpoint_list.add_argument(
@@ -332,12 +333,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 0
             if args.checkpoint_command == "list":
-                if args.trusted and args.state is not None:
+                if args.trusted and args.checkpoint_state is not None:
                     raise SystemExit("--trusted cannot be combined with --state")
                 checkpoints = (
                     ledger.trusted(run_id=args.run_id)
                     if args.trusted
-                    else ledger.list(run_id=args.run_id, state=args.state)
+                    else ledger.list(
+                        run_id=args.run_id,
+                        state=args.checkpoint_state,
+                    )
                 )
                 print(
                     json.dumps(
