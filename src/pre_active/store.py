@@ -8,6 +8,8 @@ import sqlite3
 import uuid
 from typing import Any, Callable, Iterator
 
+from .contracts import RUN_CONTRACT_VERSION, validate_contract_version
+
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -57,6 +59,9 @@ CREATE TABLE IF NOT EXISTS runs (
     paused_at REAL,
     cancelled_at REAL,
     autonomous_turn_count INTEGER NOT NULL DEFAULT 0,
+    contract_version INTEGER NOT NULL DEFAULT 1,
+    contract_event_id TEXT,
+    contract_resume_status TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -174,6 +179,9 @@ class Store:
                 ("paused_at", "REAL"),
                 ("cancelled_at", "REAL"),
                 ("autonomous_turn_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("contract_version", "INTEGER NOT NULL DEFAULT 1"),
+                ("contract_event_id", "TEXT"),
+                ("contract_resume_status", "TEXT"),
             ):
                 if column not in run_columns:
                     self.connection.execute(f"ALTER TABLE runs ADD COLUMN {column} {ddl}")
@@ -321,7 +329,9 @@ class Store:
         capabilities: set[str],
         now: float,
         source_event_id: str | None = None,
+        contract_version: int = RUN_CONTRACT_VERSION,
     ) -> str:
+        contract_version = validate_contract_version(contract_version)
         if source_event_id is not None:
             existing = self.connection.execute(
                 "SELECT id, task, capabilities_json FROM runs WHERE source_event_id=?",
@@ -337,10 +347,18 @@ class Store:
                 """
                 INSERT INTO runs (
                     id, task, status, capabilities_json, step_count, source_event_id,
-                    created_at, updated_at
-                ) VALUES (?, ?, 'RUNNING', ?, 0, ?, ?, ?)
+                    contract_version, created_at, updated_at
+                ) VALUES (?, ?, 'RUNNING', ?, 0, ?, ?, ?, ?)
                 """,
-                (run_id, task, json.dumps(sorted(capabilities)), source_event_id, now, now),
+                (
+                    run_id,
+                    task,
+                    json.dumps(sorted(capabilities)),
+                    source_event_id,
+                    contract_version,
+                    now,
+                    now,
+                ),
             )
         except sqlite3.IntegrityError:
             if source_event_id is None:
@@ -364,6 +382,7 @@ class Store:
         now: float,
         source_event_id: str | None = None,
         priority: int = 0,
+        contract_version: int = RUN_CONTRACT_VERSION,
     ) -> str:
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -372,6 +391,7 @@ class Store:
                 capabilities=capabilities,
                 now=now,
                 source_event_id=source_event_id,
+                contract_version=contract_version,
             )
             self.enqueue_event(
                 kind="run.step",
@@ -407,6 +427,9 @@ class Store:
             "paused_at": row["paused_at"],
             "cancelled_at": row["cancelled_at"],
             "autonomous_turn_count": int(row["autonomous_turn_count"]),
+            "contract_version": int(row["contract_version"]),
+            "contract_event_id": row["contract_event_id"],
+            "contract_resume_status": row["contract_resume_status"],
         }
 
     def request_run_control(
@@ -424,7 +447,8 @@ class Store:
         try:
             row = self.connection.execute(
                 """
-                SELECT status, step_count, control_action, control_reason, paused_event_id
+                SELECT status, step_count, control_action, control_reason,
+                       paused_event_id, contract_event_id, contract_resume_status
                 FROM runs WHERE id=?
                 """,
                 (run_id,),
@@ -434,6 +458,63 @@ class Store:
             status = str(row["status"])
             if status in {"COMPLETED", "FAILED", "CANCELLED"}:
                 raise RuntimeError(f"terminal run cannot accept control request: {status}")
+            if status == "BLOCKED_CONTRACT":
+                if normalized == "PAUSE":
+                    raise RuntimeError("run is already blocked on contract compatibility")
+                event_id = row["contract_event_id"]
+                if not isinstance(event_id, str) or not event_id:
+                    raise RuntimeError("contract-blocked run is missing its paused event")
+                self.append_journal(
+                    event_type="RUN_CONTROL_REQUESTED",
+                    subject_id=run_id,
+                    payload={"action": normalized, "reason": reason},
+                    now=now,
+                )
+                event_cursor = self.connection.execute(
+                    """
+                    UPDATE events
+                    SET status='CANCELLED', updated_at=?
+                    WHERE id=? AND status='PAUSED'
+                    """,
+                    (now, event_id),
+                )
+                if event_cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "contract-blocked cancellation lost paused event"
+                    )
+                run_cursor = self.connection.execute(
+                    """
+                    UPDATE runs
+                    SET status='CANCELLED', control_action=NULL,
+                        control_reason=?, control_requested_at=?,
+                        contract_event_id=NULL, contract_resume_status=NULL,
+                        cancelled_at=?, updated_at=?
+                    WHERE id=? AND status='BLOCKED_CONTRACT'
+                    """,
+                    (reason, now, now, now, run_id),
+                )
+                if run_cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "contract-blocked cancellation lost blocked run state"
+                    )
+                self.append_journal(
+                    event_type="EVENT_CANCELLED",
+                    subject_id=event_id,
+                    payload={"run_id": run_id, "from_contract_block": True},
+                    now=now,
+                )
+                self.append_journal(
+                    event_type="RUN_CANCELLED",
+                    subject_id=run_id,
+                    payload={
+                        "event_id": event_id,
+                        "reason": reason,
+                        "from_contract_block": True,
+                    },
+                    now=now,
+                )
+                self.connection.execute("COMMIT")
+                return
             current = row["control_action"]
             if current == "CANCEL" and normalized == "PAUSE":
                 raise RuntimeError("cannot replace CANCEL with PAUSE")
@@ -635,6 +716,103 @@ class Store:
         except BaseException:
             self.connection.execute("ROLLBACK")
             raise
+
+    def block_run_for_contract_mismatch(
+        self,
+        *,
+        run_id: str,
+        event_id: str,
+        worker_id: str,
+        lease_token: str,
+        runtime_contract_version: int,
+        now: float,
+    ) -> None:
+        runtime_contract_version = validate_contract_version(
+            runtime_contract_version
+        )
+        self._require_active_claim(
+            event_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            now=now,
+        )
+        row = self.connection.execute(
+            """
+            SELECT status, step_count, contract_version
+            FROM runs WHERE id=?
+            """,
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        prior_status = str(row["status"])
+        if prior_status not in {"RUNNING", "WAITING"}:
+            raise RuntimeError(
+                "contract mismatch can only block RUNNING or WAITING runs"
+            )
+        run_contract_version = int(row["contract_version"])
+        if run_contract_version == runtime_contract_version:
+            raise RuntimeError("run contract already matches runtime contract")
+
+        event_cursor = self.connection.execute(
+            """
+            UPDATE events
+            SET status='PAUSED', lease_owner=NULL, lease_until=NULL,
+                lease_token=NULL, updated_at=?
+            WHERE id=? AND status='CLAIMED'
+              AND lease_owner=? AND lease_token=?
+              AND lease_until IS NOT NULL AND lease_until > ?
+            """,
+            (now, event_id, worker_id, lease_token, now),
+        )
+        if event_cursor.rowcount != 1:
+            raise EventLeaseLost(
+                "contract mismatch pause lost event lease ownership"
+            )
+        message = (
+            f"run contract version {run_contract_version} is incompatible "
+            f"with runtime contract version {runtime_contract_version}"
+        )
+        run_cursor = self.connection.execute(
+            """
+            UPDATE runs
+            SET status='BLOCKED_CONTRACT', contract_event_id=?,
+                contract_resume_status=?, control_action=NULL,
+                last_error=?, updated_at=?
+            WHERE id=? AND status=? AND contract_version=?
+            """,
+            (
+                event_id,
+                prior_status,
+                message,
+                now,
+                run_id,
+                prior_status,
+                run_contract_version,
+            ),
+        )
+        if run_cursor.rowcount != 1:
+            raise RuntimeError("contract mismatch lost exact run state")
+        self.append_journal(
+            event_type="EVENT_PAUSED",
+            subject_id=event_id,
+            payload={
+                "run_id": run_id,
+                "reason": "contract_mismatch",
+            },
+            now=now,
+        )
+        self.append_journal(
+            event_type="RUN_CONTRACT_BLOCKED",
+            subject_id=run_id,
+            payload={
+                "event_id": event_id,
+                "run_contract_version": run_contract_version,
+                "runtime_contract_version": runtime_contract_version,
+                "resume_status": prior_status,
+            },
+            now=now,
+        )
 
     def apply_claimed_run_control(
         self,

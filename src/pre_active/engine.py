@@ -7,6 +7,7 @@ import math
 from typing import Any, Protocol
 
 from .context import ContextAssembler
+from .contracts import RUN_CONTRACT_VERSION, validate_contract_version
 from .lease import LeaseHeartbeat, LeaseLost
 from .store import Event, EventLeaseLost, Store
 from .tools import AmbiguousEffect, ToolError, ToolRegistry
@@ -157,6 +158,7 @@ class Engine:
         max_steps: int = 24,
         max_autonomous_turns_per_run: int = 16,
         max_consecutive_endogenous_turns: int = 2,
+        runtime_contract_version: int = RUN_CONTRACT_VERSION,
     ) -> None:
         self.store = store
         self.model = model
@@ -183,6 +185,9 @@ class Engine:
         self.max_consecutive_endogenous_turns = int(
             max_consecutive_endogenous_turns
         )
+        self.runtime_contract_version = validate_contract_version(
+            runtime_contract_version
+        )
 
     def submit_task(
         self,
@@ -198,6 +203,7 @@ class Engine:
             now=now,
             source_event_id=source_event_id,
             priority=0,
+            contract_version=self.runtime_contract_version,
         )
 
     def _tool_specs_for_run(
@@ -461,6 +467,36 @@ class Engine:
                 lease_token=event.lease_token,
                 now=heartbeat.current_time(),
             )
+            return run_id
+
+        if run["status"] == "RUNNING":
+            if self._apply_pending_control(
+                event=event,
+                run_id=run_id,
+                heartbeat=heartbeat,
+            ) is not None:
+                return run_id
+            run = self.store.get_run(run_id)
+
+        if (
+            run["status"] in {"RUNNING", "WAITING"}
+            and run["contract_version"] != self.runtime_contract_version
+        ):
+            with self.store.active_claim_transaction(
+                event.id,
+                worker_id=self.worker_id,
+                lease_token=event.lease_token,
+                now=heartbeat.current_time,
+                validate=heartbeat.assert_owned,
+            ) as transition_now:
+                self.store.block_run_for_contract_mismatch(
+                    run_id=run_id,
+                    event_id=event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    runtime_contract_version=self.runtime_contract_version,
+                    now=transition_now,
+                )
             return run_id
         if run["status"] == "WAITING" and event.payload.get("autonomous") is True:
             reason = event.payload.get("reason")
