@@ -272,7 +272,7 @@ Attack at minimum:
 
 Any surviving defect must receive a red regression before its fix.
 
-- [ ] **Step 2: Run exact-head local verification**
+- [x] **Step 2: Run exact-head local verification**
 
 Run:
 
