@@ -3,4 +3,4 @@ Task 1: complete
 Task 2: complete
 Task 3: complete
 Task 4 Step 1: complete
-Task 4 Step 2: complete — 206 passed in 9.25s; diff check clean
+Task 4 Step 2: complete - 206 passed in 9.25s; diff check clean
