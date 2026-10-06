@@ -1046,3 +1046,70 @@ def test_volition_dispatch_requires_explicit_confidence(tmp_path: Path) -> None:
 
     assert observers.list() == []
     store.close()
+
+
+def test_volition_dispatch_does_not_fallback_when_runtime_becomes_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    watched = tmp_path / "dispatch-no-fallback.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observers.add_file(
+        name="dispatch-no-fallback",
+        path=str(watched),
+        task="Compatibility-only task.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+        dispatch_route="volition_signal",
+        dispatch_config=_volition_dispatch_config("no-fallback"),
+    )
+
+    def unavailable():
+        raise RuntimeError("Volition runtime unavailable")
+
+    monkeypatch.setattr("pre_active.volition_bridge._load_volition", unavailable)
+
+    result = observers.tick(now=0.0)
+
+    assert result.sampled == 1
+    assert result.emitted == 0
+    assert result.errors == 1
+    record = observers.get("dispatch-no-fallback")
+    assert record["last_digest"] is None
+    assert "Volition runtime unavailable" in record["last_error"]
+    assert store.list_events(kind="volition.signal") == []
+    assert store.list_events(kind="autonomous.turn") == []
+    store.close()
+
+
+def test_volition_dispatch_unchanged_snapshot_does_not_amplify_signal(
+    tmp_path: Path,
+) -> None:
+    watched = tmp_path / "dispatch-no-amplification.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observers.add_file(
+        name="dispatch-no-amplification",
+        path=str(watched),
+        task="Compatibility-only task.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+        dispatch_route="volition_signal",
+        dispatch_config=_volition_dispatch_config("no-amplification"),
+    )
+
+    first = observers.tick(now=0.0)
+    second = observers.tick(now=10.0)
+
+    assert first.emitted == 1
+    assert second.emitted == 0
+    assert len(store.list_events(kind="volition.signal")) == 1
+    assert store.list_events(kind="autonomous.turn") == []
+    store.close()
