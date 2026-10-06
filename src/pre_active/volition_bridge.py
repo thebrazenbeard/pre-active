@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
@@ -69,11 +70,113 @@ class VolitionBridge:
             raise InvalidVolitionSignal(f"volition signal {key} must be finite")
         return number
 
+    @staticmethod
+    def _observation_context(
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        raw = payload.get("observation_context")
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise InvalidVolitionSignal("observation context must be an object")
+        allowed = {
+            "observer_id",
+            "observer_name",
+            "observer_kind",
+            "digest",
+            "summary",
+            "change_count",
+            "evidence",
+            "initiative",
+        }
+        if set(raw) != allowed:
+            raise InvalidVolitionSignal(
+                "observation context has unsupported or missing fields"
+            )
+        for key in (
+            "observer_id",
+            "observer_name",
+            "observer_kind",
+            "digest",
+            "summary",
+        ):
+            value = raw[key]
+            if not isinstance(value, str) or not value.strip():
+                raise InvalidVolitionSignal(
+                    f"observation context {key} must be non-empty text"
+                )
+        change_count = raw["change_count"]
+        if (
+            isinstance(change_count, bool)
+            or not isinstance(change_count, int)
+            or change_count < 0
+        ):
+            raise InvalidVolitionSignal(
+                "observation context change_count must be a non-negative integer"
+            )
+        evidence = raw["evidence"]
+        if not isinstance(evidence, dict):
+            raise InvalidVolitionSignal("observation context evidence must be an object")
+        initiative = raw["initiative"]
+        if not isinstance(initiative, dict) or set(initiative) != {
+            "policy_kind",
+            "reason",
+            "metrics",
+        }:
+            raise InvalidVolitionSignal(
+                "observation context initiative has unsupported or missing fields"
+            )
+        for key in ("policy_kind", "reason"):
+            value = initiative[key]
+            if not isinstance(value, str) or not value.strip():
+                raise InvalidVolitionSignal(
+                    f"observation context initiative {key} must be non-empty text"
+                )
+        metrics = initiative["metrics"]
+        if not isinstance(metrics, dict):
+            raise InvalidVolitionSignal(
+                "observation context initiative metrics must be an object"
+            )
+        for key, value in metrics.items():
+            if not isinstance(key, str) or not key:
+                raise InvalidVolitionSignal(
+                    "observation context initiative metric names must be non-empty text"
+                )
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise InvalidVolitionSignal(
+                    "observation context initiative metrics must be numeric"
+                )
+            try:
+                number = float(value)
+            except OverflowError as exc:
+                raise InvalidVolitionSignal(
+                    "observation context initiative metrics must be finite"
+                ) from exc
+            if not math.isfinite(number):
+                raise InvalidVolitionSignal(
+                    "observation context initiative metrics must be finite"
+                )
+        return {
+            "observer_id": raw["observer_id"].strip(),
+            "observer_name": raw["observer_name"].strip(),
+            "observer_kind": raw["observer_kind"].strip(),
+            "digest": raw["digest"].strip(),
+            "summary": raw["summary"].strip(),
+            "change_count": int(change_count),
+            "evidence": dict(evidence),
+            "initiative": {
+                "policy_kind": initiative["policy_kind"].strip(),
+                "reason": initiative["reason"].strip(),
+                "metrics": {str(key): float(value) for key, value in metrics.items()},
+            },
+        }
+
     def parse_signal_payload(self, payload: dict[str, Any]) -> Any:
         if not isinstance(payload, dict):
             raise InvalidVolitionSignal("volition signal payload must be an object")
         if payload.get("effect_authority", False) is not False:
             raise InvalidVolitionSignal("volition signal cannot claim effect authority")
+        self._observation_context(payload)
 
         DriveKind, ProvenanceClass, Signal, _ = _load_volition()
         target = self._text(payload, "target")
@@ -129,6 +232,7 @@ class VolitionBridge:
             return existing
 
         signal = self.parse_signal_payload(payload)
+        observation_context = self._observation_context(payload)
         _, _, _, VolitionEngine = _load_volition()
         state = self.store.get_volition_state()
 
@@ -190,15 +294,26 @@ class VolitionBridge:
                 "choice_source": choice.source if choice else None,
                 "effect_authority": False,
             }
+            cognition_task = (
+                "Continue bounded cognition on the active Volition goal. "
+                "Do not assume external effect authority.\n\n"
+                f"Goal: {request.target}"
+            )
+            if observation_context is not None:
+                volition_meta["observation_context"] = observation_context
+                cognition_task += (
+                    "\n\nObservation context (read-only):\n"
+                    + json.dumps(
+                        observation_context,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
 
             cognition_event_id = self.store.enqueue_event(
                 kind="autonomous.turn",
                 payload={
-                    "task": (
-                        "Continue bounded cognition on the active Volition goal. "
-                        "Do not assume external effect authority.\n\n"
-                        f"Goal: {request.target}"
-                    ),
+                    "task": cognition_task,
                     "capabilities": [],
                     "source": "ENDOGENOUS",
                     "reason": (

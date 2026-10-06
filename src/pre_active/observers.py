@@ -561,6 +561,24 @@ class ObserverManager:
                 raise RuntimeError(
                     f"observer initiative state is missing: {record['id']}"
                 )
+            dispatch_row = self.store.connection.execute(
+                "SELECT * FROM observer_dispatch WHERE observer_id=?",
+                (record["id"],),
+            ).fetchone()
+            if dispatch_row is None:
+                raise RuntimeError(
+                    f"observer dispatch state is missing: {record['id']}"
+                )
+            dispatch_config = json.loads(dispatch_row["config_json"])
+            if not isinstance(dispatch_config, dict):
+                raise RuntimeError("observer dispatch config must be an object")
+            dispatch_route = str(dispatch_row["route_kind"])
+            capabilities = set(json.loads(current["capabilities_json"]))
+            self._validate_dispatch(
+                route_kind=dispatch_route,
+                config=dispatch_config,
+                capabilities=capabilities,
+            )
 
             previous_digest = current["last_digest"]
             is_initial = previous_digest is None
@@ -641,29 +659,61 @@ class ObserverManager:
 
             if emit:
                 assert decision is not None
-                event_id = self.store.request_autonomous_turn(
-                    task=(
-                        str(current["task"])
-                        + "\n\nObservation evidence (read-only):\n"
-                        + json.dumps(
-                            observation.evidence,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        )
-                    ),
-                    capabilities=set(json.loads(current["capabilities_json"])),
-                    source="EXTERNAL",
-                    reason=(
-                        f"Observer {current['name']} detected change: "
-                        f"{observation.summary}"
-                    ),
-                    now=now,
-                    dedup_key=(
-                        f"observer:{record['id']}:change:{change_count}:"
-                        f"{observation.digest}"
-                    ),
-                    priority=int(current["priority"]),
-                )
+                if dispatch_route == "autonomous_turn":
+                    event_kind = "autonomous.turn"
+                    event_id = self.store.request_autonomous_turn(
+                        task=(
+                            str(current["task"])
+                            + "\n\nObservation evidence (read-only):\n"
+                            + json.dumps(
+                                observation.evidence,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                        ),
+                        capabilities=capabilities,
+                        source="EXTERNAL",
+                        reason=(
+                            f"Observer {current['name']} detected change: "
+                            f"{observation.summary}"
+                        ),
+                        now=now,
+                        dedup_key=(
+                            f"observer:{record['id']}:change:{change_count}:"
+                            f"{observation.digest}"
+                        ),
+                        priority=int(current["priority"]),
+                    )
+                else:
+                    assert dispatch_route == "volition_signal"
+                    event_kind = "volition.signal"
+                    observation_context = {
+                        "observer_id": str(record["id"]),
+                        "observer_name": str(current["name"]),
+                        "observer_kind": str(current["kind"]),
+                        "digest": observation.digest,
+                        "summary": observation.summary,
+                        "change_count": change_count,
+                        "evidence": observation.evidence,
+                        "initiative": {
+                            "policy_kind": str(initiative_row["policy_kind"]),
+                            "reason": decision.reason,
+                            "metrics": decision.metrics,
+                        },
+                    }
+                    event_id = VolitionBridge(self.store).enqueue_signal(
+                        payload={
+                            **dispatch_config,
+                            "source": f"observer:{record['id']}",
+                            "effect_authority": False,
+                            "observation_context": observation_context,
+                        },
+                        now=now,
+                        dedup_key=(
+                            f"observer:{record['id']}:volition:{change_count}:"
+                            f"{observation.digest}"
+                        ),
+                    )
                 self.store.append_journal(
                     event_type="OBSERVER_CHANGE_DETECTED",
                     subject_id=record["id"],
@@ -671,6 +721,8 @@ class ObserverManager:
                         "name": str(current["name"]),
                         "digest": observation.digest,
                         "change_count": change_count,
+                        "dispatch_route": dispatch_route,
+                        "event_kind": event_kind,
                         "event_id": event_id,
                         "initiative_policy": str(
                             initiative_row["policy_kind"]

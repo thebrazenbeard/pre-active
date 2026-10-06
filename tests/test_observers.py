@@ -659,3 +659,196 @@ def test_due_claim_does_not_decode_corrupt_dispatch_json(tmp_path: Path) -> None
     assert claimed["id"] == observer_id
     assert "dispatch" not in claimed
     store.close()
+
+
+def test_default_dispatch_emits_only_external_autonomous_turn(tmp_path: Path) -> None:
+    watched = tmp_path / "dispatch-direct.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observer_id = observers.add_file(
+        name="dispatch-direct",
+        path=str(watched),
+        task="Review direct observer change.",
+        capabilities={"files.read"},
+        every_seconds=10,
+        priority=-7,
+        emit_initial=True,
+        now=0.0,
+    )
+
+    result = observers.tick(now=0.0)
+
+    assert result.emitted == 1
+    [event] = store.list_events(kind="autonomous.turn")
+    assert store.list_events(kind="volition.signal") == []
+    assert event["payload"]["source"] == "EXTERNAL"
+    assert event["payload"]["capabilities"] == ["files.read"]
+    assert event["dedup_key"] == (
+        f"observer:{observer_id}:change:1:{observers.get('dispatch-direct')['last_digest']}"
+    )
+    journal = [
+        item for item in store.list_journal(subject_id=observer_id)
+        if item["event_type"] == "OBSERVER_CHANGE_DETECTED"
+    ]
+    assert len(journal) == 1
+    assert journal[0]["payload"]["dispatch_route"] == "autonomous_turn"
+    assert journal[0]["payload"]["event_kind"] == "autonomous.turn"
+    assert journal[0]["payload"]["event_id"] == event["id"]
+    store.close()
+
+
+def test_volition_dispatch_emits_one_signal_and_no_direct_turn(tmp_path: Path) -> None:
+    watched = tmp_path / "dispatch-volition-route.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observer_id = observers.add_file(
+        name="dispatch-volition-route",
+        path=str(watched),
+        task="Compatibility-only task.",
+        capabilities=set(),
+        every_seconds=10,
+        priority=-99,
+        emit_initial=True,
+        now=0.0,
+        dispatch_route="volition_signal",
+        dispatch_config=_volition_dispatch_config("investigate-file-change"),
+    )
+
+    result = observers.tick(now=0.0)
+
+    assert result.emitted == 1
+    assert store.list_events(kind="autonomous.turn") == []
+    [event] = store.list_events(kind="volition.signal")
+    record = observers.get("dispatch-volition-route")
+    assert event["dedup_key"] == (
+        f"observer:{observer_id}:volition:1:{record['last_digest']}"
+    )
+    assert event["payload"]["target"] == "investigate-file-change"
+    assert event["payload"]["kind"] == "open_loop"
+    assert event["payload"]["magnitude"] == pytest.approx(0.8)
+    assert event["payload"]["confidence"] == pytest.approx(1.0)
+    assert event["payload"]["provenance"] == "current_observation"
+    assert event["payload"]["source"] == f"observer:{observer_id}"
+    assert event["payload"]["effect_authority"] is False
+    context = event["payload"]["observation_context"]
+    assert context["observer_id"] == observer_id
+    assert context["observer_name"] == "dispatch-volition-route"
+    assert context["observer_kind"] == "file"
+    assert context["digest"] == record["last_digest"]
+    assert context["summary"] == record["last_summary"]
+    assert context["change_count"] == 1
+    assert context["evidence"] == record["last_evidence"]
+    assert context["initiative"] == {
+        "policy_kind": "on_change",
+        "reason": record["initiative"]["last_decision"]["reason"],
+        "metrics": record["initiative"]["last_decision"]["metrics"],
+    }
+    journal = [
+        item for item in store.list_journal(subject_id=observer_id)
+        if item["event_type"] == "OBSERVER_CHANGE_DETECTED"
+    ]
+    assert len(journal) == 1
+    assert journal[0]["payload"]["dispatch_route"] == "volition_signal"
+    assert journal[0]["payload"]["event_kind"] == "volition.signal"
+    assert journal[0]["payload"]["event_id"] == event["id"]
+    store.close()
+
+
+def test_volition_dispatch_enqueue_failure_rolls_back_observation_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    watched = tmp_path / "dispatch-rollback.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observers.add_file(
+        name="dispatch-rollback",
+        path=str(watched),
+        task="Compatibility-only task.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+        dispatch_route="volition_signal",
+        dispatch_config=_volition_dispatch_config("rollback-goal"),
+    )
+
+    def fail_enqueue(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("injected Volition enqueue failure")
+
+    monkeypatch.setattr("pre_active.observers.VolitionBridge.enqueue_signal", fail_enqueue)
+
+    result = observers.tick(now=0.0)
+
+    assert result.sampled == 1
+    assert result.emitted == 0
+    assert result.errors == 1
+    record = observers.get("dispatch-rollback")
+    assert record["last_digest"] is None
+    assert record["change_count"] == 0
+    assert record["initiative"]["state"] == {}
+    assert record["initiative"]["last_decision"] is None
+    assert "injected Volition enqueue failure" in record["last_error"]
+    assert store.list_events(kind="volition.signal") == []
+    assert store.list_events(kind="autonomous.turn") == []
+    assert not any(
+        item["event_type"] == "OBSERVER_CHANGE_DETECTED"
+        for item in store.list_journal(subject_id=record["id"])
+    )
+    store.close()
+
+
+def test_corrupt_dispatch_does_not_block_healthy_due_observer(tmp_path: Path) -> None:
+    class Stable:
+        def sample(self, config):  # type: ignore[no-untyped-def]
+            value = config["value"]
+            return Observation(
+                digest=f"digest-{value}",
+                summary=f"source {value} changed",
+                evidence={"value": value},
+            )
+
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store, adapters={"stable": Stable()})
+    corrupt_id = observers.add(
+        name="a-corrupt-dispatch",
+        kind="stable",
+        config={"value": 1},
+        task="Corrupt dispatch must fail closed.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+    )
+    observers.add(
+        name="z-healthy-dispatch",
+        kind="stable",
+        config={"value": 2},
+        task="Healthy observer still emits.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+    )
+    store.connection.execute(
+        "UPDATE observer_dispatch SET config_json='{' WHERE observer_id=?",
+        (corrupt_id,),
+    )
+
+    result = observers.tick(now=0.0)
+
+    assert result.sampled == 2
+    assert result.errors == 1
+    assert result.emitted == 1
+    corrupt = store.connection.execute(
+        "SELECT last_digest, last_error FROM observers WHERE id=?",
+        (corrupt_id,),
+    ).fetchone()
+    assert corrupt["last_digest"] is None
+    assert "JSONDecodeError" in corrupt["last_error"]
+    [event] = store.list_events(kind="autonomous.turn")
+    assert "Observer z-healthy-dispatch detected change" in event["payload"]["reason"]
+    store.close()

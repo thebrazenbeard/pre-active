@@ -91,7 +91,7 @@ C:\ProgramData\PreActive\python\python.exe -m pytest tests/test_observers.py tes
 
 Expected: all observer/initiative tests pass with unchanged default behavior.
 
-- [ ] **Step 6: Commit the passing deliverable**
+- [x] **Step 6: Commit the passing deliverable**
 
 ```bash
 git add src/pre_active/observers.py tests/test_observers.py
@@ -110,7 +110,7 @@ git commit -m "feat: persist observer dispatch routes"
 - Consumes: persisted `record["dispatch"]`, `VolitionBridge.enqueue_signal(payload, now, dedup_key)`, `VolitionBridge.process_signal_event(...)`.
 - Produces: observer-created `volition.signal` envelopes with optional validated `observation_context`; resulting ENDOGENOUS cognition metadata/task containing that read-only context.
 
-- [ ] **Step 1: Add focused failing tests**
+- [x] **Step 1: Add focused failing tests**
 
 Observer tests:
 - default route emits exactly one `autonomous.turn`, zero `volition.signal` events, preserving capability/priority/source/dedup semantics;
@@ -127,7 +127,7 @@ Bridge tests:
 - valid context is copied to generated cognition event metadata and a clearly marked read-only task section;
 - context cannot introduce capabilities/effect authority and generated cognition remains `capabilities=[]`.
 
-- [ ] **Step 2: Verify the relevant failures**
+- [x] **Step 2: Verify the relevant failures**
 
 Run:
 
@@ -137,7 +137,7 @@ C:\ProgramData\PreActive\python\python.exe -m pytest tests/test_observers.py tes
 
 Expected: failures identify missing route dispatch and context propagation.
 
-- [ ] **Step 3: Implement the minimum behavior**
+- [x] **Step 3: Implement the minimum behavior**
 
 In `observers.py`:
 - load/decode the dispatch row only inside `_record_observation`;
@@ -155,13 +155,13 @@ In `volition_bridge.py`:
 - preserve the validated context in the generated cognition event's `volition` metadata;
 - append a clearly labeled read-only observation-context JSON section to the cognition task only after Volition actually requests cognition.
 
-- [ ] **Step 4: Verify the focused pass**
+- [x] **Step 4: Verify the focused pass**
 
 Run the identical focused command.
 
 Expected: route/context tests pass.
 
-- [ ] **Step 5: Run affected integration checks**
+- [x] **Step 5: Run affected integration checks**
 
 Run:
 
