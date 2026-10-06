@@ -497,7 +497,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     enabled=args.observer_command == "enable",
                     now=now,
                 )
-                print(json.dumps(observers.get(args.name), sort_keys=True))
+                print(
+                    json.dumps(
+                        observers.get(
+                            args.name,
+                            tolerate_dispatch_error=True,
+                        ),
+                        sort_keys=True,
+                    )
+                )
                 return 0
             if args.observer_command == "remove":
                 observers.remove(args.name, now=now)

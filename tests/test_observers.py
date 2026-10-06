@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -1314,3 +1315,147 @@ def test_corrupt_dispatch_can_be_listed_disabled_and_removed(tmp_path: Path) -> 
         for item in store.list_journal(subject_id=observer_id)
     )
     store.close()
+
+
+def test_dispatch_legacy_migration_is_atomic_and_retries_after_backfill_failure(
+    tmp_path: Path,
+) -> None:
+    watched = tmp_path / "dispatch-migration-atomic.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observer_id = observers.add_file(
+        name="dispatch-migration-atomic",
+        path=str(watched),
+        task="Legacy observer.",
+        capabilities=set(),
+        every_seconds=10,
+        now=4.0,
+    )
+    store.connection.execute("DROP TABLE observer_dispatch")
+
+    def deny_dispatch_backfill(action, arg1, arg2, db_name, trigger_name):  # type: ignore[no-untyped-def]
+        if action == sqlite3.SQLITE_INSERT and arg1 == "observer_dispatch":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    store.connection.set_authorizer(deny_dispatch_backfill)
+    try:
+        with pytest.raises(sqlite3.DatabaseError):
+            ObserverManager(store)
+    finally:
+        store.connection.set_authorizer(None)
+
+    table = store.connection.execute(
+        """
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name='observer_dispatch'
+        """
+    ).fetchone()
+    assert table is None
+
+    recovered = ObserverManager(store)
+    assert recovered.get("dispatch-migration-atomic")["dispatch"] == {
+        "route_kind": "autonomous_turn",
+        "config": {},
+        "updated_at": 4.0,
+    }
+    row = store.connection.execute(
+        "SELECT observer_id FROM observer_dispatch WHERE observer_id=?",
+        (observer_id,),
+    ).fetchone()
+    assert row is not None
+    store.close()
+
+
+def test_missing_dispatch_row_is_visible_in_tolerant_list_surface(
+    tmp_path: Path,
+) -> None:
+    watched = tmp_path / "dispatch-missing-list.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    missing_id = observers.add_file(
+        name="a-missing-dispatch-list",
+        path=str(watched),
+        task="Missing dispatch row.",
+        capabilities=set(),
+        every_seconds=10,
+        now=0.0,
+    )
+    observers.add_file(
+        name="z-healthy-dispatch-list",
+        path=str(watched),
+        task="Healthy dispatch row.",
+        capabilities=set(),
+        every_seconds=10,
+        now=0.0,
+    )
+    store.connection.execute(
+        "DELETE FROM observer_dispatch WHERE observer_id=?",
+        (missing_id,),
+    )
+
+    listed = ObserverManager(store).list()
+
+    assert [item["name"] for item in listed] == [
+        "a-missing-dispatch-list",
+        "z-healthy-dispatch-list",
+    ]
+    missing = listed[0]["dispatch"]
+    assert missing["route_kind"] is None
+    assert missing["config"] is None
+    assert missing["updated_at"] is None
+    assert "observer dispatch state is missing" in missing["error"]
+    assert listed[1]["dispatch"]["route_kind"] == "autonomous_turn"
+    store.close()
+
+
+def test_cli_disable_reports_success_with_corrupt_dispatch_json(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    state = tmp_path / "dispatch-cli-repair.db"
+    watched = tmp_path / "dispatch-cli-repair.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(state)
+    observers = ObserverManager(store)
+    observer_id = observers.add_file(
+        name="dispatch-cli-repair",
+        path=str(watched),
+        task="Repair via CLI.",
+        capabilities=set(),
+        every_seconds=10,
+        now=0.0,
+    )
+    store.connection.execute(
+        "UPDATE observer_dispatch SET config_json='{' WHERE observer_id=?",
+        (observer_id,),
+    )
+    store.close()
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 5.0)
+
+    assert main([
+        "--state", str(state),
+        "observer", "disable", "dispatch-cli-repair",
+    ]) == 0
+
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload["enabled"] is False
+    assert payload["dispatch"]["route_kind"] == "autonomous_turn"
+    assert payload["dispatch"]["config"] is None
+    assert "JSONDecodeError" in payload["dispatch"]["error"]
+
+    check = Store(state)
+    raw = check.connection.execute(
+        "SELECT enabled FROM observers WHERE id=?",
+        (observer_id,),
+    ).fetchone()
+    assert raw is not None
+    assert bool(raw["enabled"]) is False
+    assert any(
+        item["event_type"] == "OBSERVER_DISABLED"
+        for item in check.list_journal(subject_id=observer_id)
+    )
+    check.close()

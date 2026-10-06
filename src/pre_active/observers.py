@@ -147,7 +147,6 @@ class ObserverManager:
         )
         self.store.connection.executescript(_OBSERVER_SCHEMA)
         self.store.connection.executescript(_INITIATIVE_SCHEMA)
-        self.store.connection.executescript(_DISPATCH_SCHEMA)
         self.store.connection.execute(
             """
             INSERT OR IGNORE INTO observer_initiative (
@@ -159,15 +158,22 @@ class ObserverManager:
             """
         )
         if not dispatch_table_existed:
-            self.store.connection.execute(
-                """
-                INSERT OR IGNORE INTO observer_dispatch (
-                    observer_id, route_kind, config_json, updated_at
+            self.store.connection.execute("BEGIN IMMEDIATE")
+            try:
+                self.store.connection.execute(_DISPATCH_SCHEMA)
+                self.store.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO observer_dispatch (
+                        observer_id, route_kind, config_json, updated_at
+                    )
+                    SELECT id, 'autonomous_turn', '{}', updated_at
+                    FROM observers
+                    """
                 )
-                SELECT id, 'autonomous_turn', '{}', updated_at
-                FROM observers
-                """
-            )
+                self.store.connection.execute("COMMIT")
+            except BaseException:
+                self.store.connection.execute("ROLLBACK")
+                raise
 
     @staticmethod
     def _validate_dispatch(
@@ -418,9 +424,15 @@ class ObserverManager:
             (observer_id,),
         ).fetchone()
         if row is None:
-            raise RuntimeError(
-                f"observer dispatch state is missing: {observer_id}"
-            )
+            message = f"observer dispatch state is missing: {observer_id}"
+            if tolerate_corrupt:
+                return {
+                    "route_kind": None,
+                    "config": None,
+                    "updated_at": None,
+                    "error": f"RuntimeError: {message}",
+                }
+            raise RuntimeError(message)
         try:
             config = json.loads(row["config_json"])
         except json.JSONDecodeError as exc:
@@ -500,14 +512,22 @@ class ObserverManager:
             for row in rows
         ]
 
-    def get(self, name: str) -> dict[str, Any]:
+    def get(
+        self,
+        name: str,
+        *,
+        tolerate_dispatch_error: bool = False,
+    ) -> dict[str, Any]:
         row = self.store.connection.execute(
             "SELECT * FROM observers WHERE name=?",
             (name,),
         ).fetchone()
         if row is None:
             raise KeyError(name)
-        return self._row_to_record(row)
+        return self._row_to_record(
+            row,
+            tolerate_dispatch_error=tolerate_dispatch_error,
+        )
 
     def set_enabled(self, name: str, *, enabled: bool, now: float) -> None:
         row = self.store.connection.execute(
