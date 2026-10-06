@@ -160,6 +160,8 @@ def build_parser() -> argparse.ArgumentParser:
     observer_add_file.add_argument("--priority", type=int, default=-10)
     observer_add_file.add_argument("--emit-initial", action="store_true")
     observer_add_file.add_argument("--capability", action="append", default=[])
+    observer_add_file.add_argument("--initiative-policy", default="on_change")
+    observer_add_file.add_argument("--initiative-config-json", default="{}")
 
     observer_sub.add_parser("list", help="list configured observers")
 
@@ -382,6 +384,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "observer":
             observers = ObserverManager(store)
             if args.observer_command == "add-file":
+                try:
+                    initiative_config = json.loads(args.initiative_config_json)
+                except json.JSONDecodeError as exc:
+                    raise SystemExit(
+                        "--initiative-config-json must be valid JSON"
+                    ) from exc
+                if not isinstance(initiative_config, dict):
+                    raise SystemExit(
+                        "--initiative-config-json must decode to a JSON object"
+                    )
                 observer_id = observers.add_file(
                     name=args.name,
                     path=args.path,
@@ -391,6 +403,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     priority=args.priority,
                     emit_initial=args.emit_initial,
                     now=now,
+                    initiative_policy=args.initiative_policy,
+                    initiative_config=initiative_config,
                 )
                 print(
                     json.dumps(
