@@ -1,6 +1,8 @@
 import argparse
 from pathlib import Path
 
+import pytest
+
 from pre_active.context import ContextAssembler
 from pre_active.daemon import Daemon
 from pre_active.engine import Engine, ModelResponse
@@ -261,3 +263,66 @@ def test_observer_cli_round_trip_and_status_snapshot(
     assert main(["--state", str(state), "observer", "remove", "cli-file"]) == 0
     removed = __import__("json").loads(capsys.readouterr().out)
     assert removed == {"name": "cli-file", "removed": True}
+
+
+
+def test_hawkes_initiative_suppresses_first_change_then_emits_burst(
+    tmp_path: Path,
+) -> None:
+    watched = tmp_path / "bursty.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observer_id = observers.add_file(
+        name="bursty-file",
+        path=str(watched),
+        task="Review a meaningful burst of file changes.",
+        capabilities={"files.read"},
+        every_seconds=0.1,
+        now=0.0,
+        initiative_policy="hawkes_threshold",
+        initiative_config={
+            "baseline_rate": 0.1,
+            "excitation": 0.4,
+            "decay_rate": 1.0,
+            "wake_threshold": 0.7,
+            "cooldown_seconds": 0.0,
+        },
+    )
+
+    baseline = observers.tick(now=0.0)
+    assert baseline.sampled == 1
+    assert baseline.emitted == 0
+    assert store.list_events(kind="autonomous.turn") == []
+
+    watched.write_text("beta", encoding="utf-8")
+    first_change = observers.tick(now=0.1)
+    assert first_change.sampled == 1
+    assert first_change.emitted == 0
+    assert store.list_events(kind="autonomous.turn") == []
+
+    after_first = observers.get("bursty-file")
+    assert after_first["change_count"] == 1
+    assert after_first["initiative"]["policy_kind"] == "hawkes_threshold"
+    assert after_first["initiative"]["state"]["excitation"] == pytest.approx(0.4)
+    assert after_first["initiative"]["last_decision"]["reason"] == "below_threshold"
+
+    watched.write_text("gamma", encoding="utf-8")
+    second_change = observers.tick(now=0.2)
+    assert second_change.sampled == 1
+    assert second_change.emitted == 1
+
+    [event] = store.list_events(kind="autonomous.turn")
+    assert event["payload"]["source"] == "EXTERNAL"
+    record = observers.get("bursty-file")
+    assert record["change_count"] == 2
+    assert record["initiative"]["state"]["excitation"] > 0.4
+    assert record["initiative"]["last_decision"]["reason"] == "threshold_met"
+
+    event_types = [
+        item["event_type"]
+        for item in store.list_journal(subject_id=observer_id)
+    ]
+    assert "OBSERVER_CHANGE_SUPPRESSED" in event_types
+    assert "OBSERVER_CHANGE_DETECTED" in event_types
+    store.close()
