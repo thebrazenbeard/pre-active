@@ -326,3 +326,45 @@ def test_hawkes_initiative_suppresses_first_change_then_emits_burst(
     assert "OBSERVER_CHANGE_SUPPRESSED" in event_types
     assert "OBSERVER_CHANGE_DETECTED" in event_types
     store.close()
+
+
+
+def test_observer_cli_configures_generic_initiative_policy(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    state = tmp_path / "initiative-cli.db"
+    watched = tmp_path / "initiative-cli.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 100.0)
+    config_json = (
+        '{"baseline_rate":0.1,"excitation":0.4,"decay_rate":1.0,'
+        '"wake_threshold":0.7,"cooldown_seconds":2.0}'
+    )
+
+    assert main([
+        "--state", str(state),
+        "observer", "add-file",
+        "initiative-cli", str(watched),
+        "Review clustered changes.",
+        "--every", "1",
+        "--initiative-policy", "hawkes_threshold",
+        "--initiative-config-json", config_json,
+    ]) == 0
+    created = __import__("json").loads(capsys.readouterr().out)
+    assert created["initiative"]["policy_kind"] == "hawkes_threshold"
+    assert created["initiative"]["config"]["wake_threshold"] == pytest.approx(0.7)
+
+    with pytest.raises(
+        SystemExit,
+        match="--initiative-config-json must decode to a JSON object",
+    ):
+        main([
+            "--state", str(state),
+            "observer", "add-file",
+            "bad-initiative", str(watched),
+            "Reject invalid policy config.",
+            "--every", "1",
+            "--initiative-config-json", "[]",
+        ])
