@@ -240,7 +240,7 @@ C:\ProgramData\PreActive\python\python.exe -m pytest
 
 Expected: complete suite passes with no regression.
 
-- [ ] **Step 6: Commit the passing deliverable**
+- [x] **Step 6: Commit the passing deliverable**
 
 ```bash
 git add src/pre_active/cli.py README.md tests/test_observers.py tests/test_volition_bridge.py
@@ -258,7 +258,7 @@ git commit -m "feat: expose observer Volition dispatch in CLI"
 - Consumes: exact feature head, Project Runner task evidence, GitHub CI, separate read-only reviewer output, existing ProgramData deployment/window policy.
 - Produces: reviewed Draft/ready PR, canonical merge if evidence is green, exact-head ProgramData deployment, durable deployment receipt.
 
-- [ ] **Step 1: Internal hostile review**
+- [x] **Step 1: Internal hostile review**
 
 Attack at minimum:
 - accidental dual dispatch;

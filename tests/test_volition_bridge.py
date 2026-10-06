@@ -464,7 +464,12 @@ def _observation_context() -> dict[str, object]:
         "digest": "abc123",
         "summary": "file snapshot changed",
         "change_count": 7,
-        "evidence": {"exists": True, "size": 42},
+        "evidence": {
+            "exists": True,
+            "size": 42,
+            "capabilities": ["shell.exec"],
+            "effect_authority": True,
+        },
         "initiative": {
             "policy_kind": "on_change",
             "reason": "changed",

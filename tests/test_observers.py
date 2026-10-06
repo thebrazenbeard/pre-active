@@ -732,6 +732,12 @@ def test_volition_dispatch_emits_one_signal_and_no_direct_turn(tmp_path: Path) -
     assert event["payload"]["provenance"] == "current_observation"
     assert event["payload"]["source"] == f"observer:{observer_id}"
     assert event["payload"]["effect_authority"] is False
+    event_row = store.connection.execute(
+        "SELECT priority FROM events WHERE id=?",
+        (event["id"],),
+    ).fetchone()
+    assert event_row is not None
+    assert int(event_row["priority"]) == 0
     context = event["payload"]["observation_context"]
     assert context["observer_id"] == observer_id
     assert context["observer_name"] == "dispatch-volition-route"
@@ -1111,5 +1117,95 @@ def test_volition_dispatch_unchanged_snapshot_does_not_amplify_signal(
     assert first.emitted == 1
     assert second.emitted == 0
     assert len(store.list_events(kind="volition.signal")) == 1
+    assert store.list_events(kind="autonomous.turn") == []
+    store.close()
+
+
+def test_volition_dispatch_journal_failure_rolls_back_enqueued_signal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    watched = tmp_path / "dispatch-journal-rollback.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observers.add_file(
+        name="dispatch-journal-rollback",
+        path=str(watched),
+        task="Compatibility-only task.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+        dispatch_route="volition_signal",
+        dispatch_config=_volition_dispatch_config("journal-rollback"),
+    )
+    original_append_journal = store.append_journal
+
+    def fail_detected_journal(*, event_type, subject_id, payload, now):  # type: ignore[no-untyped-def]
+        if event_type == "OBSERVER_CHANGE_DETECTED":
+            raise RuntimeError("injected observer journal failure")
+        return original_append_journal(
+            event_type=event_type,
+            subject_id=subject_id,
+            payload=payload,
+            now=now,
+        )
+
+    monkeypatch.setattr(store, "append_journal", fail_detected_journal)
+
+    result = observers.tick(now=0.0)
+
+    assert result.sampled == 1
+    assert result.emitted == 0
+    assert result.errors == 1
+    record = observers.get("dispatch-journal-rollback")
+    assert record["last_digest"] is None
+    assert record["change_count"] == 0
+    assert record["initiative"]["state"] == {}
+    assert record["initiative"]["last_decision"] is None
+    assert "injected observer journal failure" in record["last_error"]
+    assert store.list_events(kind="volition.signal") == []
+    assert store.list_events(kind="autonomous.turn") == []
+    store.close()
+
+
+def test_volition_dispatch_corrupt_capabilities_fail_closed_without_signal(
+    tmp_path: Path,
+) -> None:
+    watched = tmp_path / "dispatch-corrupt-capabilities.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observer_id = observers.add_file(
+        name="dispatch-corrupt-capabilities",
+        path=str(watched),
+        task="Compatibility-only task.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+        dispatch_route="volition_signal",
+        dispatch_config=_volition_dispatch_config("corrupt-capabilities"),
+    )
+    store.connection.execute(
+        "UPDATE observers SET capabilities_json=? WHERE id=?",
+        ('["shell.exec"]', observer_id),
+    )
+
+    result = observers.tick(now=0.0)
+
+    assert result.sampled == 1
+    assert result.emitted == 0
+    assert result.errors == 1
+    raw = store.connection.execute(
+        "SELECT last_digest, change_count, last_error FROM observers WHERE id=?",
+        (observer_id,),
+    ).fetchone()
+    assert raw is not None
+    assert raw["last_digest"] is None
+    assert int(raw["change_count"]) == 0
+    assert "volition_signal observers cannot have capabilities" in raw["last_error"]
+    assert store.list_events(kind="volition.signal") == []
     assert store.list_events(kind="autonomous.turn") == []
     store.close()
