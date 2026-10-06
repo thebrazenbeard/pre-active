@@ -219,3 +219,33 @@ because the final focused reviewer process did not emit a terminal PASS verdict.
 This evidence is sufficient to distinguish the implementation state from both
 the earlier NOT-READY state and from an unsupported claim of completed clean
 independent certification.
+
+
+## Final promotion readback
+
+Final feature head:
+`50090cdf54b97ea572b8f5d2de36e776ab5cfbd8`
+
+Canonical merge:
+`a0fb07b7a42f07d29bcbd9ce4e67607f6406814d` via PR #30.
+
+Final observed verification:
+
+- exact feature-head GitHub workflow run #354: success;
+- canonical main push workflow run #355: success;
+- ProgramData installed source: exact canonical merge;
+- ProgramData full suite: **212 passed in 8.84s**;
+- isolated real-model observer-to-Volition smoke: completed;
+- smoke cognition source: `ENDOGENOUS`;
+- smoke cognition capabilities: empty;
+- smoke cognition `effect_authority=false`;
+- duplicate user-local daemon: disabled with zero daemon processes;
+- production daemon/Qwen outside the configured window: zero processes;
+- autonomy window policy preserved;
+- durable deployment receipt:
+  `C:\ProgramData\PreActive\state\OBSERVER_VOLITION_DISPATCH_PROMOTION_20261006.json`.
+
+The claim ceiling is unchanged: this evidence does not establish a terminal clean
+independent PASS. It establishes that every concrete independent finding was
+resolved and independently exercised, with no known unresolved release-blocking
+defect remaining at promotion.
