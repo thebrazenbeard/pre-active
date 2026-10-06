@@ -30,12 +30,12 @@
 **Interfaces:**
 - Produces: `Store.get_volition_state()`, `Store.save_volition_state(...)`, `Store.get_volition_signal_receipt(...)`, `Store.record_volition_signal_receipt(...)`
 
-- [ ] **Step 1: Add the focused failing test**
-- [ ] **Step 2: Verify the relevant failure**
-- [ ] **Step 3: Implement the minimum behavior**
-- [ ] **Step 4: Verify the focused pass**
-- [ ] **Step 5: Run the affected integration check**
-- [ ] **Step 6: Commit the passing deliverable**
+- [x] **Step 1: Add the focused failing test**
+- [x] **Step 2: Verify the relevant failure**
+- [x] **Step 3: Implement the minimum behavior**
+- [x] **Step 4: Verify the focused pass**
+- [x] **Step 5: Run the affected integration check**
+- [x] **Step 6: Commit the passing deliverable**
 
 ### Task 2: Strict Volition adapter and idempotent cognition enqueue
 
@@ -47,12 +47,12 @@
 - Consumes: Store Volition state/receipt methods, real or injected Volition engine types.
 - Produces: `VolitionBridge.parse_signal_payload(...)`, `VolitionBridge.process_claimed_signal(...)`
 
-- [ ] **Step 1: Add failing tests for valid request, no-request budget state, replay, provenance, and authority rejection**
-- [ ] **Step 2: Verify the relevant failures**
-- [ ] **Step 3: Implement the minimum adapter**
-- [ ] **Step 4: Verify the focused pass**
-- [ ] **Step 5: Run Store + bridge integration tests**
-- [ ] **Step 6: Commit the passing deliverable**
+- [x] **Step 1: Add failing tests for valid request, no-request budget state, replay, provenance, and authority rejection**
+- [x] **Step 2: Verify the relevant failures**
+- [x] **Step 3: Implement the minimum adapter**
+- [x] **Step 4: Verify the focused pass**
+- [x] **Step 5: Run Store + bridge integration tests**
+- [x] **Step 6: Commit the passing deliverable**
 
 ### Task 3: Engine and CLI integration
 
@@ -66,12 +66,12 @@
 - Consumes: `volition.signal` events and `VolitionBridge`.
 - Produces: CLI signal ingestion and daemon processing through the existing `autonomous.turn` path.
 
-- [ ] **Step 1: Add failing Engine/CLI end-to-end tests**
-- [ ] **Step 2: Verify the relevant failures**
-- [ ] **Step 3: Implement event dispatch and CLI ingestion**
-- [ ] **Step 4: Verify the focused pass**
-- [ ] **Step 5: Run full regression and a real Volition integration smoke**
-- [ ] **Step 6: Commit the passing deliverable**
+- [x] **Step 1: Add failing Engine/CLI end-to-end tests**
+- [x] **Step 2: Verify the relevant failures**
+- [x] **Step 3: Implement event dispatch and CLI ingestion**
+- [x] **Step 4: Verify the focused pass**
+- [x] **Step 5: Run full regression and a real Volition integration smoke**
+- [x] **Step 6: Commit the passing deliverable**
 
 ### Task 4: Hostile review and release evidence
 
@@ -83,7 +83,7 @@
 - Consumes: exact branch head, test evidence, live integration evidence.
 - Produces: bounded claim/evidence record and completed implementation ledger.
 
-- [ ] **Step 1: Attack authority, replay, crash-consistency, dependency, and amplification assumptions**
-- [ ] **Step 2: Fix any surviving defect with a red-green regression**
+- [x] **Step 1: Attack authority, replay, crash-consistency, dependency, and amplification assumptions**
+- [x] **Step 2: Fix any surviving defect with a red-green regression**
 - [x] **Step 3: Run full tests**
 - [x] **Step 4: Push branch and open Draft PR without merging**
