@@ -283,7 +283,7 @@ C:\ProgramData\PreActive\python\python.exe -m pytest
 
 Expected: clean diff and complete green suite.
 
-- [ ] **Step 3: Push and obtain independent read-only review**
+- [x] **Step 3: Push and obtain independent read-only review**
 
 Push the exact feature branch and open a PR against the exact current `main`.
 
