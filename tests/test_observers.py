@@ -368,3 +368,55 @@ def test_observer_cli_configures_generic_initiative_policy(
             "--every", "1",
             "--initiative-config-json", "[]",
         ])
+
+
+
+def test_corrupt_initiative_policy_does_not_block_other_due_observers(
+    tmp_path: Path,
+) -> None:
+    class Stable:
+        def sample(self, config):  # type: ignore[no-untyped-def]
+            value = config["value"]
+            return Observation(
+                digest=f"digest-{value}",
+                summary=f"source {value} changed",
+                evidence={"value": value},
+            )
+
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store, adapters={"stable": Stable()})
+    corrupt_id = observers.add(
+        name="a-corrupt",
+        kind="stable",
+        config={"value": 1},
+        task="Corrupt policy must fail closed.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+    )
+    observers.add(
+        name="z-stable",
+        kind="stable",
+        config={"value": 2},
+        task="Stable policy should still run.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+    )
+    store.connection.execute(
+        "UPDATE observer_initiative SET policy_kind='missing-policy' "
+        "WHERE observer_id=?",
+        (corrupt_id,),
+    )
+
+    result = observers.tick(now=0.0)
+    assert result.sampled == 2
+    assert result.errors == 1
+    assert result.emitted == 1
+    assert observers.get("a-corrupt")["last_digest"] is None
+    assert "unknown initiative policy" in observers.get("a-corrupt")["last_error"]
+    [event] = store.list_events(kind="autonomous.turn")
+    assert "Observer z-stable detected change" in event["payload"]["reason"]
+    store.close()
