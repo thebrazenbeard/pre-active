@@ -11,6 +11,7 @@ from .contracts import RUN_CONTRACT_VERSION, validate_contract_version
 from .lease import LeaseHeartbeat, LeaseLost
 from .store import Event, EventLeaseLost, Store
 from .tools import AmbiguousEffect, ToolError, ToolRegistry
+from .volition_bridge import InvalidVolitionSignal, VolitionBridge
 
 
 @dataclass(frozen=True)
@@ -358,6 +359,77 @@ class Engine:
         now: float,
         heartbeat: LeaseHeartbeat,
     ) -> str | None:
+        if event.kind == "volition.signal":
+            try:
+                with self.store.active_claim_transaction(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=heartbeat.current_time,
+                    validate=heartbeat.assert_owned,
+                ) as transition_now:
+                    VolitionBridge(self.store).process_signal_event(
+                        source_event_id=event.id,
+                        payload=event.payload,
+                        now=transition_now,
+                    )
+                    self.store.ack_event(
+                        event.id,
+                        worker_id=self.worker_id,
+                        lease_token=event.lease_token,
+                        now=transition_now,
+                    )
+            except InvalidVolitionSignal as exc:
+                with self.store.active_claim_transaction(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=heartbeat.current_time,
+                    validate=heartbeat.assert_owned,
+                ) as transition_now:
+                    self.store.append_journal(
+                        event_type="EVENT_REJECTED",
+                        subject_id=event.id,
+                        payload={"reason": f"invalid volition.signal: {exc}"},
+                        now=transition_now,
+                    )
+                    self.store.ack_event(
+                        event.id,
+                        worker_id=self.worker_id,
+                        lease_token=event.lease_token,
+                        now=transition_now,
+                    )
+            except EventLeaseLost as exc:
+                raise LeaseLost(str(exc)) from exc
+            except Exception as exc:
+                transition_now = heartbeat.current_time()
+                retry_delay = min(60.0, 2.0 ** min(event.attempts, 6))
+                dead_lettered = self.store.fail_event(
+                    event.id,
+                    worker_id=self.worker_id,
+                    lease_token=event.lease_token,
+                    now=transition_now,
+                    retry_at=transition_now + retry_delay,
+                    max_attempts=self.max_event_attempts,
+                    error=f"{type(exc).__name__}: {exc}",
+                    failed_run_id=None,
+                )
+                self.store.append_journal(
+                    event_type=(
+                        "VOLITION_FAILURE_DEAD_LETTERED"
+                        if dead_lettered
+                        else "VOLITION_FAILURE_RETRY_SCHEDULED"
+                    ),
+                    subject_id=event.id,
+                    payload={
+                        "attempt": event.attempts,
+                        "retry_delay_seconds": retry_delay,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                    now=transition_now,
+                )
+                raise
+            return None
         if event.kind in {"task.requested", "autonomous.turn"}:
             task = event.payload.get("task")
             capabilities = event.payload.get("capabilities", [])

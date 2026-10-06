@@ -6,6 +6,10 @@ from typing import Any
 from .store import Store
 
 
+class InvalidVolitionSignal(ValueError):
+    """Explicit input-contract violation for a volition.signal event."""
+
+
 def _load_volition() -> tuple[Any, Any, Any, Any]:
     try:
         from volition import DriveKind, ProvenanceClass, Signal, VolitionEngine
@@ -20,11 +24,29 @@ class VolitionBridge:
     def __init__(self, store: Store) -> None:
         self.store = store
 
+    def enqueue_signal(
+        self,
+        *,
+        payload: dict[str, Any],
+        now: float,
+        dedup_key: str | None = None,
+    ) -> str:
+        self.parse_signal_payload(payload)
+        normalized = dict(payload)
+        normalized["effect_authority"] = False
+        return self.store.enqueue_event(
+            kind="volition.signal",
+            payload=normalized,
+            priority=0,
+            dedup_key=dedup_key,
+            now=now,
+        )
+
     @staticmethod
     def _text(payload: dict[str, Any], key: str) -> str:
         value = payload.get(key)
         if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"volition signal {key} must be non-empty text")
+            raise InvalidVolitionSignal(f"volition signal {key} must be non-empty text")
         return value.strip()
 
     @staticmethod
@@ -36,17 +58,17 @@ class VolitionBridge:
     ) -> float:
         value = payload.get(key, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"volition signal {key} must be numeric")
+            raise InvalidVolitionSignal(f"volition signal {key} must be numeric")
         number = float(value)
         if not math.isfinite(number):
-            raise ValueError(f"volition signal {key} must be finite")
+            raise InvalidVolitionSignal(f"volition signal {key} must be finite")
         return number
 
     def parse_signal_payload(self, payload: dict[str, Any]) -> Any:
         if not isinstance(payload, dict):
-            raise ValueError("volition signal payload must be an object")
+            raise InvalidVolitionSignal("volition signal payload must be an object")
         if payload.get("effect_authority", False) is not False:
-            raise ValueError("volition signal cannot claim effect authority")
+            raise InvalidVolitionSignal("volition signal cannot claim effect authority")
 
         DriveKind, ProvenanceClass, Signal, _ = _load_volition()
         target = self._text(payload, "target")
@@ -55,15 +77,15 @@ class VolitionBridge:
         try:
             kind = DriveKind(self._text(payload, "kind"))
         except ValueError as exc:
-            raise ValueError("volition signal kind is unsupported") from exc
+            raise InvalidVolitionSignal("volition signal kind is unsupported") from exc
         try:
             provenance = ProvenanceClass(self._text(payload, "provenance"))
         except ValueError as exc:
-            raise ValueError("volition signal provenance is unsupported") from exc
+            raise InvalidVolitionSignal("volition signal provenance is unsupported") from exc
 
         current_reappraisal = payload.get("current_reappraisal", False)
         if not isinstance(current_reappraisal, bool):
-            raise ValueError("volition signal current_reappraisal must be boolean")
+            raise InvalidVolitionSignal("volition signal current_reappraisal must be boolean")
 
         return Signal(
             target=target,

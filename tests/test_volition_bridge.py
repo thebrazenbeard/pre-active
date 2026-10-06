@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
+from pre_active.cli import main
+from pre_active.context import ContextAssembler
+from pre_active.engine import Engine, ModelResponse
 from pre_active.store import Store
+from pre_active.tools import ToolRegistry
 from pre_active.volition_bridge import VolitionBridge
 from volition import Policy, VolitionEngine
 
@@ -203,3 +208,159 @@ def test_bridge_rejects_effect_authority_claim_before_state_change(tmp_path: Pat
 
     assert store.get_volition_state() is None
     assert store.list_events(kind="autonomous.turn") == []
+
+
+class _FinalModel:
+    def respond(self, *, messages, tools):
+        return ModelResponse(final_text="VOLITION_ENGINE_OK")
+
+
+def _engine(store: Store) -> Engine:
+    return Engine(
+        store=store,
+        model=_FinalModel(),
+        tools=ToolRegistry(store),
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="volition-bridge-test",
+    )
+
+
+def test_engine_consumes_volition_signal_then_grants_endogenous_run(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+    signal_event_id = bridge.enqueue_signal(
+        payload=_open_loop_payload(),
+        now=1.0,
+        dedup_key="volition-signal:engine",
+    )
+    engine = _engine(store)
+
+    assert engine.run_once(now=2.0) is None
+    [signal_event] = store.list_events(kind="volition.signal")
+    assert signal_event["id"] == signal_event_id
+    assert signal_event["status"] == "DONE"
+
+    [cognition] = store.list_events(kind="autonomous.turn")
+    assert cognition["status"] == "PENDING"
+    assert cognition["payload"]["source"] == "ENDOGENOUS"
+    assert cognition["payload"]["capabilities"] == []
+
+    run_id = engine.run_once(now=3.0)
+    assert run_id is not None
+    run = store.get_run(run_id)
+    assert run["capabilities"] == set()
+    assert "Source: ENDOGENOUS" in run["task"]
+    assert "Volition requested cognition" in run["task"]
+
+    assert engine.run_once(now=4.0) == run_id
+    completed = store.get_run(run_id)
+    assert completed["status"] == "COMPLETED"
+    assert completed["final_text"] == "VOLITION_ENGINE_OK"
+
+
+def test_engine_rejects_malformed_volition_signal_without_retry(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    event_id = store.enqueue_event(
+        kind="volition.signal",
+        payload={**_open_loop_payload(), "effect_authority": True},
+        dedup_key="volition-signal:invalid",
+        now=1.0,
+    )
+    engine = _engine(store)
+
+    assert engine.run_once(now=2.0) is None
+    [event] = store.list_events(kind="volition.signal")
+    assert event["id"] == event_id
+    assert event["status"] == "DONE"
+    assert store.get_volition_state() is None
+    assert store.list_events(kind="autonomous.turn") == []
+    journal = store.list_journal(subject_id=event_id)
+    assert any(item["event_type"] == "EVENT_REJECTED" for item in journal)
+
+
+def test_cli_enqueues_typed_volition_signal_idempotently(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    state = tmp_path / "state.db"
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 10.0)
+    args = [
+        "--state", str(state),
+        "volition-signal", "investigate",
+        "--kind", "open_loop",
+        "--magnitude", "0.8",
+        "--source", "observer:file",
+        "--provenance", "current_observation",
+        "--dedup-key", "cli-signal-1",
+    ]
+
+    assert main(args) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert main(args) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert first["event_id"] == second["event_id"]
+
+    store = Store(state)
+    [event] = store.list_events(kind="volition.signal")
+    assert event["payload"]["target"] == "investigate"
+    assert event["payload"]["kind"] == "open_loop"
+    assert event["payload"]["effect_authority"] is False
+    store.close()
+
+
+def test_engine_retries_volition_execution_failure_immediately(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = Store(tmp_path / "state.db")
+    event_id = store.enqueue_event(
+        kind="volition.signal",
+        payload=_open_loop_payload(),
+        dedup_key="volition-signal:runtime-failure",
+        now=1.0,
+    )
+    engine = _engine(store)
+
+    def unavailable():
+        raise RuntimeError("volition unavailable")
+
+    monkeypatch.setattr("pre_active.volition_bridge._load_volition", unavailable)
+
+    with pytest.raises(RuntimeError, match="volition unavailable"):
+        engine.run_once(now=2.0)
+
+    [event] = store.list_events(kind="volition.signal")
+    assert event["id"] == event_id
+    assert event["status"] == "PENDING"
+    assert event["attempts"] == 1
+    assert "volition unavailable" in event["last_error"]
+
+
+def test_engine_retries_corrupt_persisted_volition_state_instead_of_rejecting_signal(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    store.save_volition_state(
+        {"schema": "BROKEN_VOLITION_STATE"},
+        expected_revision=0,
+        now=0.0,
+    )
+    event_id = store.enqueue_event(
+        kind="volition.signal",
+        payload=_open_loop_payload(),
+        dedup_key="volition-signal:corrupt-state",
+        now=1.0,
+    )
+    engine = _engine(store)
+
+    with pytest.raises(ValueError, match="unsupported or missing Volition state schema"):
+        engine.run_once(now=2.0)
+
+    [event] = store.list_events(kind="volition.signal")
+    assert event["id"] == event_id
+    assert event["status"] == "PENDING"
+    assert event["attempts"] == 1
+    assert "unsupported or missing Volition state schema" in event["last_error"]
+    assert not any(
+        item["event_type"] == "EVENT_REJECTED"
+        for item in store.list_journal(subject_id=event_id)
+    )
