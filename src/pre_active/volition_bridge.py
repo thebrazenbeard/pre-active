@@ -59,7 +59,12 @@ class VolitionBridge:
         value = payload.get(key, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise InvalidVolitionSignal(f"volition signal {key} must be numeric")
-        number = float(value)
+        try:
+            number = float(value)
+        except OverflowError as exc:
+            raise InvalidVolitionSignal(
+                f"volition signal {key} must be finite"
+            ) from exc
         if not math.isfinite(number):
             raise InvalidVolitionSignal(f"volition signal {key} must be finite")
         return number
@@ -130,9 +135,13 @@ class VolitionBridge:
         if state is None:
             engine = VolitionEngine()
             expected_revision = 0
+            state_now = now
         else:
             engine = VolitionEngine.from_snapshot(state["snapshot"])
             expected_revision = int(state["revision"])
+            previous_updated_at = float(state["updated_at"])
+            state_now = max(previous_updated_at, now)
+            engine.advance(state_now - previous_updated_at)
 
         goal = engine.tick([signal])
         request = engine.request_cognition()
@@ -164,7 +173,7 @@ class VolitionBridge:
         revision = self.store.save_volition_state(
             engine.snapshot(),
             expected_revision=expected_revision,
-            now=now,
+            now=state_now,
         )
 
         cognition_event_id: str | None = None

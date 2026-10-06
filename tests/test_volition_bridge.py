@@ -364,3 +364,93 @@ def test_engine_retries_corrupt_persisted_volition_state_instead_of_rejecting_si
         item["event_type"] == "EVENT_REJECTED"
         for item in store.list_journal(subject_id=event_id)
     )
+
+
+def test_bridge_advances_persisted_clock_and_renews_budget_after_reappraisal(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+    payload = _open_loop_payload("reappraise-me")
+
+    for index, now in enumerate((1.0, 2.0, 3.0), start=1):
+        receipt = _apply_signal(
+            store,
+            bridge,
+            source_event_id=f"signal-{index}",
+            payload=payload,
+            now=now,
+        )
+        assert receipt["cognition_event_id"] is not None
+
+    exhausted = store.get_volition_state()
+    assert exhausted is not None
+    assert exhausted["snapshot"]["endogenous_turns"] == 3
+    assert exhausted["snapshot"]["elapsed_seconds"] == pytest.approx(2.0)
+    assert exhausted["snapshot"]["active_goal"]["revision"] == 1
+
+    renewed = _apply_signal(
+        store,
+        bridge,
+        source_event_id="signal-after-horizon",
+        payload=payload,
+        now=21603.0,
+    )
+
+    assert renewed["cognition_event_id"] is not None
+    restored = store.get_volition_state()
+    assert restored is not None
+    assert restored["snapshot"]["elapsed_seconds"] == pytest.approx(21602.0)
+    assert restored["snapshot"]["active_goal"]["revision"] == 2
+    assert restored["snapshot"]["endogenous_turns"] == 1
+    assert len(store.list_events(kind="autonomous.turn")) == 4
+
+
+def test_bridge_does_not_move_durable_clock_anchor_backwards(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+
+    _apply_signal(
+        store,
+        bridge,
+        source_event_id="signal-forward",
+        payload=_open_loop_payload("clock-anchor"),
+        now=100.0,
+    )
+    _apply_signal(
+        store,
+        bridge,
+        source_event_id="signal-backward",
+        payload=_open_loop_payload("clock-anchor"),
+        now=90.0,
+    )
+
+    state = store.get_volition_state()
+    assert state is not None
+    assert state["updated_at"] == pytest.approx(100.0)
+    assert state["snapshot"]["elapsed_seconds"] == pytest.approx(0.0)
+
+
+def test_engine_rejects_oversized_numeric_signal_without_retry(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    payload = _open_loop_payload()
+    payload["magnitude"] = 10**400
+    event_id = store.enqueue_event(
+        kind="volition.signal",
+        payload=payload,
+        dedup_key="volition-signal:oversized-number",
+        now=1.0,
+    )
+    engine = _engine(store)
+
+    assert engine.run_once(now=2.0) is None
+
+    [event] = store.list_events(kind="volition.signal")
+    assert event["id"] == event_id
+    assert event["status"] == "DONE"
+    assert event["attempts"] == 1
+    assert store.list_events(kind="autonomous.turn") == []
+    assert any(
+        item["event_type"] == "EVENT_REJECTED"
+        for item in store.list_journal(subject_id=event_id)
+    )
