@@ -637,8 +637,16 @@ class ObserverManager:
                     now=now,
                 )
                 continue
-            if self._record_observation(record, observation, now=now):
-                emitted += 1
+            try:
+                if self._record_observation(record, observation, now=now):
+                    emitted += 1
+            except Exception as exc:
+                errors += 1
+                self._record_error(
+                    record,
+                    error=f"{type(exc).__name__}: {exc}",
+                    now=now,
+                )
         return ObserverTickResult(sampled=sampled, emitted=emitted, errors=errors)
 
     def snapshot(self, *, now: float) -> dict[str, Any]:
