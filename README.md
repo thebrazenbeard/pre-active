@@ -222,6 +222,41 @@ Signal processing is receipt-bound and crash-consistent with the resulting Volit
 state revision and cognition event. Re-delivery of the same source event does not
 amplify into another turn.
 
+### Observer dispatch routes
+
+Observers keep their existing direct `autonomous_turn` route by default. An
+observer can instead opt into a mutually exclusive `volition_signal` route after
+its initiative policy decides to emit.
+
+```bash
+pre-active --state .pre-active/state.db observer add-file \
+  ci-watch /path/to/ci.json \
+  "Compatibility-only task." \
+  --every 30 \
+  --dispatch-route volition_signal \
+  --dispatch-config-json \
+  '{"target":"investigate-ci","kind":"open_loop","magnitude":0.8,"confidence":1.0,"provenance":"current_observation"}'
+```
+
+A Volition-routed observer must have an empty capability set. Pre-Active derives
+the signal source from the observer ID, forces `effect_authority=false`, and does
+not forward observer priority into the Volition path.
+
+One initiative emission takes exactly one route:
+
+```text
+observer change -> initiative emit
+                -> autonomous_turn
+                XOR
+                -> volition_signal
+```
+
+Observation digest, summary, evidence, change count, and initiative evidence are
+carried in a separate read-only `observation_context` envelope. That envelope is
+not part of Volition motive scoring and cannot grant capabilities, queue priority,
+or effect authority. The observer's positional task is retained for compatibility
+but is ignored by the `volition_signal` route.
+
 ### Observer initiative policies
 
 Durable observers default to `on_change`: every eligible snapshot change grants an

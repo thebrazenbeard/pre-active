@@ -852,3 +852,130 @@ def test_corrupt_dispatch_does_not_block_healthy_due_observer(tmp_path: Path) ->
     [event] = store.list_events(kind="autonomous.turn")
     assert "Observer z-healthy-dispatch detected change" in event["payload"]["reason"]
     store.close()
+
+
+def test_observer_cli_configures_volition_dispatch_and_validates_json(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    state = tmp_path / "dispatch-cli.db"
+    watched = tmp_path / "dispatch-cli.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 100.0)
+
+    assert main([
+        "--state", str(state),
+        "observer", "add-file",
+        "dispatch-cli-default", str(watched),
+        "Review default dispatch.",
+        "--every", "30",
+    ]) == 0
+    default_created = __import__("json").loads(capsys.readouterr().out)
+    assert default_created["dispatch"]["route_kind"] == "autonomous_turn"
+    assert default_created["dispatch"]["config"] == {}
+
+    config_json = __import__("json").dumps(_volition_dispatch_config("cli-volition"))
+    assert main([
+        "--state", str(state),
+        "observer", "add-file",
+        "dispatch-cli-volition", str(watched),
+        "Compatibility-only task.",
+        "--every", "30",
+        "--dispatch-route", "volition_signal",
+        "--dispatch-config-json", config_json,
+    ]) == 0
+    created = __import__("json").loads(capsys.readouterr().out)
+    assert created["dispatch"]["route_kind"] == "volition_signal"
+    assert created["dispatch"]["config"]["target"] == "cli-volition"
+
+    with pytest.raises(SystemExit, match="--dispatch-config-json must be valid JSON"):
+        main([
+            "--state", str(state),
+            "observer", "add-file",
+            "dispatch-cli-bad-json", str(watched),
+            "Reject malformed dispatch JSON.",
+            "--every", "30",
+            "--dispatch-route", "volition_signal",
+            "--dispatch-config-json", "{",
+        ])
+
+    with pytest.raises(
+        SystemExit,
+        match="--dispatch-config-json must decode to a JSON object",
+    ):
+        main([
+            "--state", str(state),
+            "observer", "add-file",
+            "dispatch-cli-bad-object", str(watched),
+            "Reject non-object dispatch JSON.",
+            "--every", "30",
+            "--dispatch-route", "volition_signal",
+            "--dispatch-config-json", "[]",
+        ])
+
+
+def test_daemon_routes_observer_through_volition_to_zero_capability_run(
+    tmp_path: Path,
+) -> None:
+    watched = tmp_path / "volition-daemon.txt"
+    watched.write_text("ready", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observer_id = observers.add_file(
+        name="volition-daemon-file",
+        path=str(watched),
+        task="Compatibility-only task.",
+        capabilities=set(),
+        every_seconds=60,
+        emit_initial=True,
+        now=1.0,
+        dispatch_route="volition_signal",
+        dispatch_config=_volition_dispatch_config("investigate-daemon-file"),
+    )
+    daemon = Daemon(
+        scheduler=Scheduler(store),
+        observers=observers,
+        engine=Engine(
+            store=store,
+            model=FinalModel(),
+            tools=ToolRegistry(store),
+            context=ContextAssembler(store),
+            system_prompt="Run tasks.",
+            worker_id="volition-observer-daemon",
+        ),
+    )
+
+    first = daemon.cycle(now=1.0)
+    assert first.observer_samples == 1
+    assert first.observer_events == 1
+    assert first.run_id is None
+    [signal] = store.list_events(kind="volition.signal")
+    assert signal["status"] == "DONE"
+    assert signal["payload"]["source"] == f"observer:{observer_id}"
+
+    [cognition] = store.list_events(kind="autonomous.turn")
+    assert cognition["status"] == "PENDING"
+    assert cognition["payload"]["source"] == "ENDOGENOUS"
+    assert cognition["payload"]["capabilities"] == []
+    assert cognition["payload"]["volition"]["effect_authority"] is False
+    assert store.list_events(kind="task.requested") == []
+
+    second = daemon.cycle(now=2.0)
+    assert second.observer_events == 0
+    assert second.run_id is not None
+    run_id = second.run_id
+    run = store.get_run(run_id)
+    assert run["capabilities"] == set()
+    assert run["status"] == "RUNNING"
+    assert "Observation context (read-only):" in run["task"]
+    assert "volition-daemon-file" in run["task"]
+
+    third = daemon.cycle(now=3.0)
+    assert third.run_id == run_id
+    completed = store.get_run(run_id)
+    assert completed["status"] == "COMPLETED"
+    assert completed["final_text"] == "observer turn complete"
+    assert completed["capabilities"] == set()
+    assert len(store.list_events(kind="autonomous.turn")) == 1
+    store.close()

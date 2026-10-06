@@ -171,7 +171,7 @@ C:\ProgramData\PreActive\python\python.exe -m pytest tests/test_observers.py tes
 
 Expected: all affected tests pass; default route remains behavior-compatible.
 
-- [ ] **Step 6: Commit the passing deliverable**
+- [x] **Step 6: Commit the passing deliverable**
 
 ```bash
 git add src/pre_active/observers.py src/pre_active/volition_bridge.py tests/test_observers.py tests/test_volition_bridge.py
@@ -190,7 +190,7 @@ git commit -m "feat: route observer emissions through Volition"
 - Consumes: `ObserverManager.add_file(... dispatch_route, dispatch_config ...)`.
 - Produces: `observer add-file --dispatch-route --dispatch-config-json` and end-to-end file-change â†’ Volition â†’ ENDOGENOUS run behavior.
 
-- [ ] **Step 1: Add focused failing tests**
+- [x] **Step 1: Add focused failing tests**
 
 Add tests proving:
 - parser exposes `--dispatch-route` defaulting to `autonomous_turn` and `--dispatch-config-json` defaulting to `{}`;
@@ -202,7 +202,7 @@ Add tests proving:
   `file change -> volition.signal -> ENDOGENOUS autonomous.turn -> completed zero-capability run`,
   with no direct EXTERNAL observer turn.
 
-- [ ] **Step 2: Verify the relevant failure**
+- [x] **Step 2: Verify the relevant failure**
 
 Run:
 
@@ -212,7 +212,7 @@ C:\ProgramData\PreActive\python\python.exe -m pytest tests/test_observers.py tes
 
 Expected: failures show missing CLI flags and missing end-to-end route.
 
-- [ ] **Step 3: Implement the minimum behavior**
+- [x] **Step 3: Implement the minimum behavior**
 
 In `cli.py`:
 - add the two additive observer flags;
@@ -224,13 +224,13 @@ In `README.md`:
 - state XOR dispatch, empty-capability rule, separate observation context, and no authority escalation;
 - include one CLI example matching the approved spec.
 
-- [ ] **Step 4: Verify the focused pass**
+- [x] **Step 4: Verify the focused pass**
 
 Run the identical focused command.
 
 Expected: CLI/end-to-end focused tests pass.
 
-- [ ] **Step 5: Run full local regression**
+- [x] **Step 5: Run full local regression**
 
 Run:
 
