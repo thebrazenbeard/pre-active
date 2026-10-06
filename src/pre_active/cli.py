@@ -12,6 +12,7 @@ from .context import ContextAssembler
 from .contracts import RUN_CONTRACT_VERSION
 from .daemon import Daemon
 from .engine import Engine
+from .observers import ObserverManager
 from .model_targets import (
     ModelTarget,
     TargetResolvingModelAdapter,
