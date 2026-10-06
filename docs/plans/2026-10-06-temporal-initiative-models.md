@@ -1,6 +1,6 @@
 # Temporal Initiative Models V1 Implementation Plan
 
-> **For agentic workers:** Use the host's available task-by-task implementation workflow. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Use the host's available task-by-task implementation workflow. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add a durable, research-grounded initiative-policy seam to Pre-Active observers and ship an exponential-Hawkes threshold policy without changing default observer behavior.
 
@@ -31,33 +31,33 @@
 - Consumes: policy configuration plus durable JSON-compatible state and observation time.
 - Produces: `InitiativeDecision(emit, state, metrics, reason)`, `OnChangePolicy`, `ExponentialHawkesThresholdPolicy`, and `build_initiative_policy(kind, config)`.
 
-- [ ] **Step 1: Add the focused failing tests**
+- [x] **Step 1: Add the focused failing tests**
 
 Test that `on_change` emits, exponential Hawkes excitation accumulates across nearby events and decays across distant events, cooldown suppresses emission without discarding excitation, and invalid/supercritical parameters raise `ValueError`.
 
-- [ ] **Step 2: Verify the relevant failure**
+- [x] **Step 2: Verify the relevant failure**
 
 Run: `pytest -q tests/test_initiative.py`
 
 Expected: collection/import failure because `pre_active.initiative` does not exist.
 
-- [ ] **Step 3: Implement the minimum behavior**
+- [x] **Step 3: Implement the minimum behavior**
 
 Use an immutable decision dataclass. Validate finite numeric parameters. Maintain `excitation`, `last_event_at`, and `last_emit_at` in JSON-compatible state. Clamp negative wall-clock deltas to zero so a clock correction cannot manufacture extra decay. Reject unknown policy kinds.
 
-- [ ] **Step 4: Verify the focused pass**
+- [x] **Step 4: Verify the focused pass**
 
 Run: `pytest -q tests/test_initiative.py`
 
 Expected: all initiative tests pass.
 
-- [ ] **Step 5: Run the affected integration check**
+- [x] **Step 5: Run the affected integration check**
 
 Run: `pytest -q tests/test_observers.py`
 
 Expected: existing observer tests pass unchanged.
 
-- [ ] **Step 6: Commit the passing deliverable**
+- [x] **Step 6: Commit the passing deliverable**
 
 Commit message: `feat: add temporal initiative policy core`
 
@@ -71,33 +71,33 @@ Commit message: `feat: add temporal initiative policy core`
 - Consumes: `build_initiative_policy(kind, config)` and current `Observation`.
 - Produces: durable `observer_initiative` state, additive `initiative` data in observer records, and gated `autonomous.turn` emission.
 
-- [ ] **Step 1: Add the focused failing test**
+- [x] **Step 1: Add the focused failing test**
 
 Configure a file observer with a Hawkes threshold where the first post-baseline change is suppressed and a second nearby change crosses threshold. Assert one autonomous turn, `change_count == 2`, persisted excitation state, and a suppression journal event.
 
-- [ ] **Step 2: Verify the relevant failure**
+- [x] **Step 2: Verify the relevant failure**
 
 Run: `pytest -q tests/test_observers.py -k initiative`
 
 Expected: failure because observer configuration has no initiative-policy arguments or persistence.
 
-- [ ] **Step 3: Implement the minimum behavior**
+- [x] **Step 3: Implement the minimum behavior**
 
 Create `observer_initiative` with `observer_id`, `policy_kind`, `config_json`, `state_json`, `last_decision_json`, and `updated_at`. Backfill existing observers to `on_change`. Validate policies on add. In `_record_observation`, update change count for every eligible detected change, evaluate the policy, atomically persist policy state and observation state, journal suppression, and emit only on `decision.emit`.
 
-- [ ] **Step 4: Verify the focused pass**
+- [x] **Step 4: Verify the focused pass**
 
 Run: `pytest -q tests/test_observers.py -k initiative`
 
 Expected: initiative observer test passes.
 
-- [ ] **Step 5: Run the affected integration check**
+- [x] **Step 5: Run the affected integration check**
 
 Run: `pytest -q tests/test_observers.py`
 
 Expected: all observer tests pass.
 
-- [ ] **Step 6: Commit the passing deliverable**
+- [x] **Step 6: Commit the passing deliverable**
 
 Commit message: `feat: gate observer turns with durable initiative policy`
 
@@ -112,33 +112,33 @@ Commit message: `feat: gate observer turns with durable initiative policy`
 - Consumes: `--initiative-policy` and `--initiative-config-json` on `observer add-file`.
 - Produces: validated observer policy configuration visible through existing `observer show/list` JSON.
 
-- [ ] **Step 1: Add the focused failing test**
+- [x] **Step 1: Add the focused failing test**
 
 Parse CLI arguments for Hawkes policy configuration and verify invalid non-object JSON exits with a clear message.
 
-- [ ] **Step 2: Verify the relevant failure**
+- [x] **Step 2: Verify the relevant failure**
 
 Run: `pytest -q tests/test_observers.py -k cli`
 
 Expected: failure because the new CLI flags do not exist.
 
-- [ ] **Step 3: Implement the minimum behavior**
+- [x] **Step 3: Implement the minimum behavior**
 
 Add the two generic CLI flags. Decode JSON to a dictionary, pass policy kind/config to `ObserverManager.add_file`, and document one Hawkes example plus the evidence/authority boundary.
 
-- [ ] **Step 4: Verify the focused pass**
+- [x] **Step 4: Verify the focused pass**
 
 Run: `pytest -q tests/test_observers.py -k cli`
 
 Expected: CLI initiative tests pass.
 
-- [ ] **Step 5: Run the affected integration check**
+- [x] **Step 5: Run the affected integration check**
 
 Run: `python -m compileall -q src && pytest -q`
 
 Expected: zero exit with the entire repository test suite passing.
 
-- [ ] **Step 6: Commit the passing deliverable**
+- [x] **Step 6: Commit the passing deliverable**
 
 Commit message: `docs: expose observer initiative policy configuration`
 
