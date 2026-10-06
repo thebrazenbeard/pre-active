@@ -595,3 +595,103 @@ def test_bridge_does_not_attach_context_for_different_active_goal(
     assert "Observation context (read-only):" not in event["payload"]["task"]
     assert "observer-B" not in event["payload"]["task"]
     store.close()
+
+
+def _static_signal_config(target: str = "scheduled-goal") -> dict[str, object]:
+    return {
+        "target": target,
+        "kind": "open_loop",
+        "magnitude": 0.8,
+        "confidence": 1.0,
+        "provenance": "current_observation",
+    }
+
+
+def test_static_signal_config_validation_derives_authority_sensitive_fields() -> None:
+    config = {
+        **_static_signal_config(),
+        "expected_information_gain": 0.4,
+        "learning_progress": 0.2,
+        "controllability": 0.9,
+        "predicted_deficit_reduction": 0.7,
+        "current_reappraisal": True,
+    }
+
+    payload = VolitionBridge.validate_static_signal_config(
+        config,
+        source="schedule:schedule-1",
+    )
+
+    assert payload == {
+        **config,
+        "source": "schedule:schedule-1",
+        "effect_authority": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "bad_key",
+    [
+        "source",
+        "effect_authority",
+        "capabilities",
+        "priority",
+        "observation_context",
+        "unknown_future_field",
+    ],
+)
+def test_static_signal_config_validation_rejects_runtime_or_unknown_fields(
+    bad_key: str,
+) -> None:
+    config = _static_signal_config()
+    config[bad_key] = "forbidden"
+
+    with pytest.raises(ValueError, match="static signal config contains unsupported field"):
+        VolitionBridge.validate_static_signal_config(
+            config,
+            source="schedule:schedule-1",
+        )
+
+
+@pytest.mark.parametrize(
+    "required_key",
+    ["target", "kind", "magnitude", "confidence", "provenance"],
+)
+def test_static_signal_config_validation_requires_complete_motive_config(
+    required_key: str,
+) -> None:
+    config = _static_signal_config()
+    del config[required_key]
+
+    with pytest.raises(
+        ValueError,
+        match=f"static signal config missing required field: {required_key}",
+    ):
+        VolitionBridge.validate_static_signal_config(
+            config,
+            source="schedule:schedule-1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("kind", "not-a-drive", "kind is unsupported"),
+        ("provenance", "not-provenance", "provenance is unsupported"),
+        ("magnitude", float("nan"), "magnitude must be finite"),
+        ("confidence", True, "confidence must be numeric"),
+    ],
+)
+def test_static_signal_config_validation_reuses_signal_semantics(
+    key: str,
+    value: object,
+    message: str,
+) -> None:
+    config = _static_signal_config()
+    config[key] = value
+
+    with pytest.raises(InvalidVolitionSignal, match=message):
+        VolitionBridge.validate_static_signal_config(
+            config,
+            source="schedule:schedule-1",
+        )

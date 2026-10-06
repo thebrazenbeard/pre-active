@@ -195,41 +195,10 @@ class ObserverManager:
                 raise ValueError(
                     f"dispatch config cannot contain {reserved_key}"
                 )
-        allowed_fields = {
-            "target",
-            "kind",
-            "magnitude",
-            "confidence",
-            "provenance",
-            "expected_information_gain",
-            "learning_progress",
-            "controllability",
-            "predicted_deficit_reduction",
-            "current_reappraisal",
-        }
-        unsupported = sorted(set(config) - allowed_fields)
-        if unsupported:
-            raise ValueError(
-                f"dispatch config contains unsupported field: {unsupported[0]}"
-            )
-        for required_key in (
-            "target",
-            "kind",
-            "magnitude",
-            "confidence",
-            "provenance",
-        ):
-            if required_key not in config:
-                raise ValueError(
-                    f"dispatch config missing required field: {required_key}"
-                )
-        validator = VolitionBridge.__new__(VolitionBridge)
-        validator.parse_signal_payload(
-            {
-                **config,
-                "source": "observer:validation",
-                "effect_authority": False,
-            }
+        VolitionBridge.validate_static_signal_config(
+            config,
+            source="observer:validation",
+            label="dispatch config",
         )
 
     def add(

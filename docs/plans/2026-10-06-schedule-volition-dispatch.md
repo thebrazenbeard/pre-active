@@ -1,6 +1,6 @@
 # Schedule → Volition Dispatch V1 Implementation Plan
 
-> **For agentic workers:** Use the host's available task-by-task implementation workflow. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Use the host's available task-by-task implementation workflow. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add an opt-in recurring schedule path that emits typed `volition.signal` events without changing existing ordinary or direct-autonomous schedules.
 
@@ -39,7 +39,7 @@
 - Produces: `VolitionBridge.validate_static_signal_config(config, *, source) -> dict[str, Any]`.
 - Consumes: existing `VolitionBridge.parse_signal_payload` semantic validation.
 
-- [ ] **Step 1: Add focused failing tests**
+- [x] **Step 1: Add focused failing tests**
 
 Prove the new validator:
 - returns a normalized payload containing the complete valid motive config plus derived source and false effect authority;
@@ -50,7 +50,7 @@ Prove the new validator:
 
 Add a regression that observer Volition dispatch still accepts/rejects the same configs after switching to the shared helper.
 
-- [ ] **Step 2: Verify the red phase**
+- [x] **Step 2: Verify the red phase**
 
 Run:
 
@@ -60,7 +60,7 @@ Run:
 
 Expected: focused failures because the shared validator does not exist.
 
-- [ ] **Step 3: Implement the minimum validator**
+- [x] **Step 3: Implement the minimum validator**
 
 In `volition_bridge.py`:
 - define the static allowlist and required field set once;
@@ -74,13 +74,13 @@ In `observers.py`:
 - replace the duplicated allowlist/required-field logic and `__new__` parser call with the shared helper;
 - retain the empty-capability requirement and direct-route behavior.
 
-- [ ] **Step 4: Verify focused green**
+- [x] **Step 4: Verify focused green**
 
 Run the identical focused command.
 
 Expected: all validator/observer dispatch tests pass.
 
-- [ ] **Step 5: Run affected integration**
+- [x] **Step 5: Run affected integration**
 
 Run:
 
