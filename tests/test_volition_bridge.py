@@ -10,7 +10,7 @@ from pre_active.context import ContextAssembler
 from pre_active.engine import Engine, ModelResponse
 from pre_active.store import Store
 from pre_active.tools import ToolRegistry
-from pre_active.volition_bridge import VolitionBridge
+from pre_active.volition_bridge import InvalidVolitionSignal, VolitionBridge
 from volition import Policy, VolitionEngine
 
 
@@ -454,3 +454,144 @@ def test_engine_rejects_oversized_numeric_signal_without_retry(tmp_path: Path) -
         item["event_type"] == "EVENT_REJECTED"
         for item in store.list_journal(subject_id=event_id)
     )
+
+
+def _observation_context() -> dict[str, object]:
+    return {
+        "observer_id": "observer-1",
+        "observer_name": "ci-watch",
+        "observer_kind": "file",
+        "digest": "abc123",
+        "summary": "file snapshot changed",
+        "change_count": 7,
+        "evidence": {
+            "exists": True,
+            "size": 42,
+            "capabilities": ["shell.exec"],
+            "effect_authority": True,
+        },
+        "initiative": {
+            "policy_kind": "on_change",
+            "reason": "changed",
+            "metrics": {},
+        },
+    }
+
+
+def test_bridge_copies_valid_observation_context_into_endogenous_cognition(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+    payload = _open_loop_payload("investigate-context")
+    payload["observation_context"] = _observation_context()
+
+    receipt = _apply_signal(
+        store,
+        bridge,
+        source_event_id="signal-context",
+        payload=payload,
+        now=1.0,
+    )
+
+    assert receipt["cognition_event_id"] is not None
+    [event] = store.list_events(kind="autonomous.turn")
+    assert event["payload"]["source"] == "ENDOGENOUS"
+    assert event["payload"]["capabilities"] == []
+    assert event["payload"]["volition"]["effect_authority"] is False
+    assert event["payload"]["volition"]["observation_context"] == _observation_context()
+    assert "Observation context (read-only):" in event["payload"]["task"]
+    assert '"observer_name":"ci-watch"' in event["payload"]["task"]
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda c: c.update(observer_id=1),
+        lambda c: c.update(change_count=-1),
+        lambda c: c.update(evidence=[]),
+        lambda c: c.update(initiative={"policy_kind": "on_change"}),
+        lambda c: c.update(source="forbidden"),
+    ],
+)
+def test_bridge_rejects_malformed_observation_context(
+    tmp_path: Path,
+    mutate,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+    payload = _open_loop_payload("bad-context")
+    context = _observation_context()
+    mutate(context)
+    payload["observation_context"] = context
+
+    store.connection.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(InvalidVolitionSignal, match="observation context"):
+            bridge.process_signal_event(
+                source_event_id="signal-bad-context",
+                payload=payload,
+                now=1.0,
+            )
+    finally:
+        store.connection.execute("ROLLBACK")
+
+    assert store.get_volition_state() is None
+    assert store.list_events(kind="autonomous.turn") == []
+    store.close()
+
+
+def test_bridge_does_not_attach_context_for_different_active_goal(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+
+    first_payload = _open_loop_payload("goal-A")
+    first_payload["magnitude"] = 0.9
+    first_context = _observation_context()
+    first_context["observer_id"] = "observer-A"
+    first_context["observer_name"] = "observer-A"
+    first_context["digest"] = "digest-A"
+    first_context["summary"] = "Only goal A changed"
+    first_payload["observation_context"] = first_context
+
+    first = _apply_signal(
+        store,
+        bridge,
+        source_event_id="signal-A",
+        payload=first_payload,
+        now=1.0,
+    )
+    assert first["cognition_event_id"] is not None
+
+    second_payload = _open_loop_payload("goal-B")
+    second_payload["magnitude"] = 0.1
+    second_context = _observation_context()
+    second_context["observer_id"] = "observer-B"
+    second_context["observer_name"] = "observer-B"
+    second_context["digest"] = "digest-B"
+    second_context["summary"] = "Only goal B changed"
+    second_payload["observation_context"] = second_context
+
+    second = _apply_signal(
+        store,
+        bridge,
+        source_event_id="signal-B",
+        payload=second_payload,
+        now=2.0,
+    )
+
+    assert second["cognition_event_id"] is not None
+    event = next(
+        item
+        for item in store.list_events(kind="autonomous.turn")
+        if item["id"] == second["cognition_event_id"]
+    )
+    assert event["payload"]["volition"]["target"] == "goal-A"
+    assert event["payload"]["volition"]["signal_event_id"] == "signal-B"
+    assert "observation_context" not in event["payload"]["volition"]
+    assert "Observation context (read-only):" not in event["payload"]["task"]
+    assert "observer-B" not in event["payload"]["task"]
+    store.close()

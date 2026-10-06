@@ -180,6 +180,12 @@ def build_parser() -> argparse.ArgumentParser:
     observer_add_file.add_argument("--capability", action="append", default=[])
     observer_add_file.add_argument("--initiative-policy", default="on_change")
     observer_add_file.add_argument("--initiative-config-json", default="{}")
+    observer_add_file.add_argument(
+        "--dispatch-route",
+        default="autonomous_turn",
+        choices=["autonomous_turn", "volition_signal"],
+    )
+    observer_add_file.add_argument("--dispatch-config-json", default="{}")
 
     observer_sub.add_parser("list", help="list configured observers")
 
@@ -448,6 +454,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise SystemExit(
                         "--initiative-config-json must decode to a JSON object"
                     )
+                try:
+                    dispatch_config = json.loads(args.dispatch_config_json)
+                except json.JSONDecodeError as exc:
+                    raise SystemExit(
+                        "--dispatch-config-json must be valid JSON"
+                    ) from exc
+                if not isinstance(dispatch_config, dict):
+                    raise SystemExit(
+                        "--dispatch-config-json must decode to a JSON object"
+                    )
                 observer_id = observers.add_file(
                     name=args.name,
                     path=args.path,
@@ -459,6 +475,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     now=now,
                     initiative_policy=args.initiative_policy,
                     initiative_config=initiative_config,
+                    dispatch_route=args.dispatch_route,
+                    dispatch_config=dispatch_config,
                 )
                 print(
                     json.dumps(
@@ -479,7 +497,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     enabled=args.observer_command == "enable",
                     now=now,
                 )
-                print(json.dumps(observers.get(args.name), sort_keys=True))
+                print(
+                    json.dumps(
+                        observers.get(
+                            args.name,
+                            tolerate_dispatch_error=True,
+                        ),
+                        sort_keys=True,
+                    )
+                )
                 return 0
             if args.observer_command == "remove":
                 observers.remove(args.name, now=now)
