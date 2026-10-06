@@ -120,6 +120,29 @@ CREATE TABLE IF NOT EXISTS model_targets (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS model_targets_one_active_idx
 ON model_targets(is_active) WHERE is_active=1;
+CREATE TABLE IF NOT EXISTS volition_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    snapshot_json TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS volition_signal_receipts (
+    source_event_id TEXT PRIMARY KEY,
+    state_revision INTEGER NOT NULL CHECK (state_revision >= 1),
+    cognition_event_id TEXT,
+    goal_id TEXT,
+    target TEXT NOT NULL,
+    urgency REAL,
+    provenance TEXT NOT NULL,
+    signal_source TEXT NOT NULL,
+    choice_id TEXT,
+    choice_class TEXT,
+    choice_source TEXT,
+    created_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS volition_receipt_cognition_idx
+ON volition_signal_receipts(cognition_event_id)
+WHERE cognition_event_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS journal (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
@@ -1254,6 +1277,167 @@ class Store:
             self.connection.execute("COMMIT")
         except BaseException:
             self.connection.execute("ROLLBACK")
+            raise
+
+    def get_volition_state(self) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT revision, snapshot_json, updated_at FROM volition_state WHERE id=1"
+        ).fetchone()
+        if row is None:
+            return None
+        snapshot = json.loads(str(row["snapshot_json"]))
+        if not isinstance(snapshot, dict):
+            raise RuntimeError("stored volition snapshot must be an object")
+        return {
+            "revision": int(row["revision"]),
+            "snapshot": snapshot,
+            "updated_at": float(row["updated_at"]),
+        }
+
+    def save_volition_state(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        expected_revision: int,
+        now: float,
+    ) -> int:
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            raise ValueError("expected_revision must be an integer")
+        if expected_revision < 0:
+            raise ValueError("expected_revision must be >= 0")
+        if not isinstance(snapshot, dict):
+            raise ValueError("volition snapshot must be an object")
+        payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+        owns_transaction = not self.connection.in_transaction
+        if owns_transaction:
+            self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT revision FROM volition_state WHERE id=1"
+            ).fetchone()
+            if row is None:
+                if expected_revision != 0:
+                    raise RuntimeError("volition state revision changed")
+                revision = 1
+                self.connection.execute(
+                    """
+                    INSERT INTO volition_state (id, snapshot_json, revision, updated_at)
+                    VALUES (1, ?, ?, ?)
+                    """,
+                    (payload, revision, now),
+                )
+            else:
+                current_revision = int(row["revision"])
+                if current_revision != expected_revision:
+                    raise RuntimeError("volition state revision changed")
+                revision = current_revision + 1
+                cursor = self.connection.execute(
+                    """
+                    UPDATE volition_state
+                    SET snapshot_json=?, revision=?, updated_at=?
+                    WHERE id=1 AND revision=?
+                    """,
+                    (payload, revision, now, current_revision),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("volition state revision changed")
+            if owns_transaction:
+                self.connection.execute("COMMIT")
+            return revision
+        except BaseException:
+            if owns_transaction and self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
+
+    def get_volition_signal_receipt(
+        self, source_event_id: str
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT source_event_id, state_revision, cognition_event_id, goal_id,
+                   target, urgency, provenance, signal_source, choice_id,
+                   choice_class, choice_source, created_at
+            FROM volition_signal_receipts
+            WHERE source_event_id=?
+            """,
+            (source_event_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "source_event_id": str(row["source_event_id"]),
+            "state_revision": int(row["state_revision"]),
+            "cognition_event_id": row["cognition_event_id"],
+            "goal_id": row["goal_id"],
+            "target": str(row["target"]),
+            "urgency": None if row["urgency"] is None else float(row["urgency"]),
+            "provenance": str(row["provenance"]),
+            "signal_source": str(row["signal_source"]),
+            "choice_id": row["choice_id"],
+            "choice_class": row["choice_class"],
+            "choice_source": row["choice_source"],
+            "created_at": float(row["created_at"]),
+        }
+
+    def record_volition_signal_receipt(
+        self,
+        *,
+        source_event_id: str,
+        state_revision: int,
+        cognition_event_id: str | None,
+        goal_id: str | None,
+        target: str,
+        urgency: float | None,
+        provenance: str,
+        signal_source: str,
+        choice_id: str | None,
+        choice_class: str | None,
+        choice_source: str | None,
+        now: float,
+    ) -> None:
+        if not source_event_id:
+            raise ValueError("source_event_id is required")
+        if state_revision < 1:
+            raise ValueError("state_revision must be >= 1")
+        owns_transaction = not self.connection.in_transaction
+        if owns_transaction:
+            self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.get_volition_signal_receipt(source_event_id)
+            if existing is not None:
+                raise RuntimeError("volition signal receipt already exists")
+            self.connection.execute(
+                """
+                INSERT INTO volition_signal_receipts (
+                    source_event_id, state_revision, cognition_event_id, goal_id,
+                    target, urgency, provenance, signal_source, choice_id,
+                    choice_class, choice_source, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_event_id,
+                    int(state_revision),
+                    cognition_event_id,
+                    goal_id,
+                    target,
+                    urgency,
+                    provenance,
+                    signal_source,
+                    choice_id,
+                    choice_class,
+                    choice_source,
+                    now,
+                ),
+            )
+            if owns_transaction:
+                self.connection.execute("COMMIT")
+        except sqlite3.IntegrityError as exc:
+            if owns_transaction and self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise RuntimeError("volition signal receipt already exists") from exc
+        except BaseException:
+            if owns_transaction and self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
             raise
 
     def request_autonomous_turn(

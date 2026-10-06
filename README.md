@@ -184,6 +184,44 @@ pre-active --state .pre-active/state.db autonomous-turn \
   --reason "A monitored pull request changed from green to red"
 ```
 
+### Volition cognition bridge
+
+Pre-Active can consume explicit typed motive signals from canonical Volition and turn
+a bounded Volition `CognitionRequest` into the ordinary Pre-Active
+`autonomous.turn` path.
+
+Install the pinned bridge dependency when using this integration:
+
+```bash
+python -m pip install -e '.[volition]'
+```
+
+Enqueue a typed signal:
+
+```bash
+pre-active --state .pre-active/state.db volition-signal investigate-ci \
+  --kind open_loop \
+  --magnitude 0.8 \
+  --source observer:ci \
+  --provenance current_observation \
+  --dedup-key ci-investigation-1
+```
+
+Pre-Active does not infer wants from arbitrary event text. The bridge accepts an
+explicit Volition `Signal`, durably restores/updates `VOLITION_STATE_V2`, and
+emits at most one `ENDOGENOUS` cognition event for that signal. The generated
+turn always starts with an empty capability set; urgency and motive score do not
+grant tools or effect authority.
+
+```text
+VOLITION_SIGNAL != WANT != CHOICE != GOAL != COGNITION_REQUEST
+                != CAPABILITY != EFFECT_AUTHORITY
+```
+
+Signal processing is receipt-bound and crash-consistent with the resulting Volition
+state revision and cognition event. Re-delivery of the same source event does not
+amplify into another turn.
+
 ### Observer initiative policies
 
 Durable observers default to `on_change`: every eligible snapshot change grants an

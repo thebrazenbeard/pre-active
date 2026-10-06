@@ -12,7 +12,13 @@ license = {text = "Source-available proprietary; see LICENSE"}
 readme = "README.md"
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10"]
+volition = [
+    "volition @ git+https://github.com/thebrazenbeard/volition.git@dbc628d376515a0a523b1eecdf62129cca5d6b08",
+]
+dev = [
+    "pytest>=8,<10",
+    "volition @ git+https://github.com/thebrazenbeard/volition.git@dbc628d376515a0a523b1eecdf62129cca5d6b08",
+]
 
 [project.scripts]
 pre-active = "pre_active.cli:main"

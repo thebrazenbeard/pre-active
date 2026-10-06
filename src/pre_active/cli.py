@@ -24,6 +24,7 @@ from .progress import ProgressLedger
 from .scheduler import Scheduler
 from .store import Store
 from .tools import ToolRegistry
+from .volition_bridge import VolitionBridge
 
 
 def _open_store(path: str) -> Store:
@@ -142,6 +143,23 @@ def build_parser() -> argparse.ArgumentParser:
     autonomous.add_argument("--reason", required=True)
     autonomous.add_argument("--after", type=float, default=0.0, help="delay in seconds")
     autonomous.add_argument("--capability", action="append", default=[])
+
+    volition_signal = sub.add_parser(
+        "volition-signal",
+        help="enqueue one explicit typed Volition motive signal",
+    )
+    volition_signal.add_argument("target")
+    volition_signal.add_argument("--kind", required=True)
+    volition_signal.add_argument("--magnitude", type=float, required=True)
+    volition_signal.add_argument("--confidence", type=float, default=1.0)
+    volition_signal.add_argument("--source", required=True)
+    volition_signal.add_argument("--provenance", default="current_observation")
+    volition_signal.add_argument("--expected-information-gain", type=float, default=0.0)
+    volition_signal.add_argument("--learning-progress", type=float, default=0.0)
+    volition_signal.add_argument("--controllability", type=float, default=1.0)
+    volition_signal.add_argument("--predicted-deficit-reduction", type=float, default=1.0)
+    volition_signal.add_argument("--current-reappraisal", action="store_true")
+    volition_signal.add_argument("--dedup-key")
 
     observer = sub.add_parser(
         "observer",
@@ -376,6 +394,42 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "kind": "autonomous.turn",
                         "source": args.source,
                         "available_at": now + args.after,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command == "volition-signal":
+            payload = {
+                "target": args.target,
+                "kind": args.kind,
+                "magnitude": args.magnitude,
+                "confidence": args.confidence,
+                "source": args.source,
+                "provenance": args.provenance,
+                "expected_information_gain": args.expected_information_gain,
+                "learning_progress": args.learning_progress,
+                "controllability": args.controllability,
+                "predicted_deficit_reduction": args.predicted_deficit_reduction,
+                "current_reappraisal": args.current_reappraisal,
+                "effect_authority": False,
+            }
+            try:
+                event_id = VolitionBridge(store).enqueue_signal(
+                    payload=payload,
+                    now=now,
+                    dedup_key=args.dedup_key,
+                )
+            except (ValueError, RuntimeError) as exc:
+                raise SystemExit(str(exc)) from exc
+            print(
+                json.dumps(
+                    {
+                        "event_id": event_id,
+                        "kind": "volition.signal",
+                        "target": args.target,
+                        "drive_kind": args.kind,
+                        "provenance": args.provenance,
                     },
                     sort_keys=True,
                 )
