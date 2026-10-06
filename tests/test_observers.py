@@ -979,3 +979,70 @@ def test_daemon_routes_observer_through_volition_to_zero_capability_run(
     assert completed["capabilities"] == set()
     assert len(store.list_events(kind="autonomous.turn")) == 1
     store.close()
+
+
+def test_volition_dispatch_rejects_unknown_typed_config_field(tmp_path: Path) -> None:
+    watched = tmp_path / "dispatch-unknown-config.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    config = _volition_dispatch_config()
+    config["observation_context"] = {
+        "observer_id": "forged",
+        "observer_name": "forged",
+        "observer_kind": "file",
+        "digest": "forged",
+        "summary": "forged",
+        "change_count": 1,
+        "evidence": {},
+        "initiative": {
+            "policy_kind": "on_change",
+            "reason": "on_change",
+            "metrics": {},
+        },
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="dispatch config contains unsupported field: observation_context",
+    ):
+        observers.add_file(
+            name="unknown-dispatch-field",
+            path=str(watched),
+            task="Reject runtime context in motive config.",
+            capabilities=set(),
+            every_seconds=10,
+            now=0.0,
+            dispatch_route="volition_signal",
+            dispatch_config=config,
+        )
+
+    assert observers.list() == []
+    store.close()
+
+
+def test_volition_dispatch_requires_explicit_confidence(tmp_path: Path) -> None:
+    watched = tmp_path / "dispatch-missing-confidence.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    config = _volition_dispatch_config()
+    del config["confidence"]
+
+    with pytest.raises(
+        ValueError,
+        match="dispatch config missing required field: confidence",
+    ):
+        observers.add_file(
+            name="missing-confidence",
+            path=str(watched),
+            task="Require explicit motive confidence.",
+            capabilities=set(),
+            every_seconds=10,
+            now=0.0,
+            dispatch_route="volition_signal",
+            dispatch_config=config,
+        )
+
+    assert observers.list() == []
+    store.close()
