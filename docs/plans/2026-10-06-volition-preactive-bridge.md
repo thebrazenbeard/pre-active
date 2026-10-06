@@ -85,5 +85,5 @@
 
 - [ ] **Step 1: Attack authority, replay, crash-consistency, dependency, and amplification assumptions**
 - [ ] **Step 2: Fix any surviving defect with a red-green regression**
-- [ ] **Step 3: Run full tests**
+- [x] **Step 3: Run full tests**
 - [ ] **Step 4: Push branch and open Draft PR without merging**
