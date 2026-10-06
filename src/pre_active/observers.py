@@ -286,8 +286,13 @@ class ObserverManager:
             "updated_at": float(row["updated_at"]),
         }
 
-    def _row_to_record(self, row: sqlite3.Row) -> dict[str, Any]:
-        return {
+    def _row_to_record(
+        self,
+        row: sqlite3.Row,
+        *,
+        include_initiative: bool = True,
+    ) -> dict[str, Any]:
+        record = {
             "id": str(row["id"]),
             "name": str(row["name"]),
             "kind": str(row["kind"]),
@@ -313,8 +318,10 @@ class ObserverManager:
             "change_count": int(row["change_count"]),
             "created_at": float(row["created_at"]),
             "updated_at": float(row["updated_at"]),
-            "initiative": self._initiative_record(str(row["id"])),
         }
+        if include_initiative:
+            record["initiative"] = self._initiative_record(str(row["id"]))
+        return record
 
     def list(self) -> list[dict[str, Any]]:
         rows = self.store.connection.execute(
@@ -394,7 +401,7 @@ class ObserverManager:
                 self.store.connection.execute("COMMIT")
                 return None
             self.store.connection.execute("COMMIT")
-            return self._row_to_record(row)
+            return self._row_to_record(row, include_initiative=False)
         except BaseException:
             self.store.connection.execute("ROLLBACK")
             raise
