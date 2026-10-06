@@ -420,3 +420,59 @@ def test_corrupt_initiative_policy_does_not_block_other_due_observers(
     [event] = store.list_events(kind="autonomous.turn")
     assert "Observer z-stable detected change" in event["payload"]["reason"]
     store.close()
+
+
+
+def test_corrupt_initiative_json_does_not_block_other_due_observers(
+    tmp_path: Path,
+) -> None:
+    class Stable:
+        def sample(self, config):  # type: ignore[no-untyped-def]
+            value = config["value"]
+            return Observation(
+                digest=f"digest-{value}",
+                summary=f"source {value} changed",
+                evidence={"value": value},
+            )
+
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store, adapters={"stable": Stable()})
+    corrupt_id = observers.add(
+        name="a-corrupt-json",
+        kind="stable",
+        config={"value": 1},
+        task="Corrupt initiative state must fail closed.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+    )
+    observers.add(
+        name="z-stable-json-peer",
+        kind="stable",
+        config={"value": 2},
+        task="Stable policy should still run.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+    )
+    store.connection.execute(
+        "UPDATE observer_initiative SET state_json='{' WHERE observer_id=?",
+        (corrupt_id,),
+    )
+
+    result = observers.tick(now=0.0)
+
+    assert result.sampled == 2
+    assert result.errors == 1
+    assert result.emitted == 1
+    assert "JSONDecodeError" in (
+        store.connection.execute(
+            "SELECT last_error FROM observers WHERE id=?",
+            (corrupt_id,),
+        ).fetchone()["last_error"]
+    )
+    [event] = store.list_events(kind="autonomous.turn")
+    assert "Observer z-stable-json-peer detected change" in event["payload"]["reason"]
+    store.close()
