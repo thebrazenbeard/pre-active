@@ -8,6 +8,7 @@ import sqlite3
 import uuid
 from typing import Any, Mapping, Protocol
 
+from .initiative import build_initiative_policy
 from .store import Store
 
 
@@ -37,6 +38,17 @@ CREATE TABLE IF NOT EXISTS observers (
 );
 CREATE INDEX IF NOT EXISTS observers_due_idx
 ON observers(enabled, next_at, name);
+"""
+
+_INITIATIVE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS observer_initiative (
+    observer_id TEXT PRIMARY KEY REFERENCES observers(id) ON DELETE CASCADE,
+    policy_kind TEXT NOT NULL,
+    config_json TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    last_decision_json TEXT,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -114,6 +126,17 @@ class ObserverManager:
         if adapters:
             self.adapters.update(adapters)
         self.store.connection.executescript(_OBSERVER_SCHEMA)
+        self.store.connection.executescript(_INITIATIVE_SCHEMA)
+        self.store.connection.execute(
+            """
+            INSERT OR IGNORE INTO observer_initiative (
+                observer_id, policy_kind, config_json, state_json,
+                last_decision_json, updated_at
+            )
+            SELECT id, 'on_change', '{}', '{}', NULL, updated_at
+            FROM observers
+            """
+        )
 
     def add(
         self,
@@ -128,6 +151,8 @@ class ObserverManager:
         priority: int = -10,
         emit_initial: bool = False,
         first_at: float | None = None,
+        initiative_policy: str = "on_change",
+        initiative_config: dict[str, Any] | None = None,
     ) -> str:
         normalized_name = name.strip()
         normalized_kind = kind.strip()
@@ -139,43 +164,75 @@ class ObserverManager:
             raise ValueError("observer task is required")
         if every_seconds <= 0:
             raise ValueError("observer interval must be > 0")
+        normalized_initiative_policy = initiative_policy.strip().lower()
+        initiative_config_value = dict(initiative_config or {})
+        build_initiative_policy(
+            normalized_initiative_policy,
+            initiative_config_value,
+        )
+
         observer_id = str(uuid.uuid4())
         next_at = now if first_at is None else float(first_at)
-        self.store.connection.execute(
-            """
-            INSERT INTO observers (
-                id, name, kind, config_json, task, capabilities_json,
-                priority, interval_seconds, next_at, enabled, emit_initial,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-            """,
-            (
-                observer_id,
-                normalized_name,
-                normalized_kind,
-                json.dumps(config, sort_keys=True, separators=(",", ":")),
-                task.strip(),
-                json.dumps(sorted(capabilities)),
-                int(priority),
-                float(every_seconds),
-                next_at,
-                1 if emit_initial else 0,
-                now,
-                now,
-            ),
-        )
-        self.store.append_journal(
-            event_type="OBSERVER_CONFIGURED",
-            subject_id=observer_id,
-            payload={
-                "name": normalized_name,
-                "kind": normalized_kind,
-                "priority": int(priority),
-                "every_seconds": float(every_seconds),
-                "emit_initial": bool(emit_initial),
-            },
-            now=now,
-        )
+        self.store.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.store.connection.execute(
+                """
+                INSERT INTO observers (
+                    id, name, kind, config_json, task, capabilities_json,
+                    priority, interval_seconds, next_at, enabled, emit_initial,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                """,
+                (
+                    observer_id,
+                    normalized_name,
+                    normalized_kind,
+                    json.dumps(config, sort_keys=True, separators=(",", ":")),
+                    task.strip(),
+                    json.dumps(sorted(capabilities)),
+                    int(priority),
+                    float(every_seconds),
+                    next_at,
+                    1 if emit_initial else 0,
+                    now,
+                    now,
+                ),
+            )
+            self.store.connection.execute(
+                """
+                INSERT INTO observer_initiative (
+                    observer_id, policy_kind, config_json, state_json,
+                    last_decision_json, updated_at
+                ) VALUES (?, ?, ?, '{}', NULL, ?)
+                """,
+                (
+                    observer_id,
+                    normalized_initiative_policy,
+                    json.dumps(
+                        initiative_config_value,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    now,
+                ),
+            )
+            self.store.append_journal(
+                event_type="OBSERVER_CONFIGURED",
+                subject_id=observer_id,
+                payload={
+                    "name": normalized_name,
+                    "kind": normalized_kind,
+                    "priority": int(priority),
+                    "every_seconds": float(every_seconds),
+                    "emit_initial": bool(emit_initial),
+                    "initiative_policy": normalized_initiative_policy,
+                },
+                now=now,
+            )
+            self.store.connection.execute("COMMIT")
+        except BaseException:
+            self.store.connection.execute("ROLLBACK")
+            raise
         return observer_id
 
     def add_file(
@@ -190,6 +247,8 @@ class ObserverManager:
         priority: int = -10,
         emit_initial: bool = False,
         first_at: float | None = None,
+        initiative_policy: str = "on_change",
+        initiative_config: dict[str, Any] | None = None,
     ) -> str:
         return self.add(
             name=name,
@@ -202,10 +261,38 @@ class ObserverManager:
             priority=priority,
             emit_initial=emit_initial,
             first_at=first_at,
+            initiative_policy=initiative_policy,
+            initiative_config=initiative_config,
         )
 
-    def _row_to_record(self, row: sqlite3.Row) -> dict[str, Any]:
+    def _initiative_record(self, observer_id: str) -> dict[str, Any]:
+        row = self.store.connection.execute(
+            "SELECT * FROM observer_initiative WHERE observer_id=?",
+            (observer_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"observer initiative state is missing: {observer_id}"
+            )
         return {
+            "policy_kind": str(row["policy_kind"]),
+            "config": json.loads(row["config_json"]),
+            "state": json.loads(row["state_json"]),
+            "last_decision": (
+                None
+                if row["last_decision_json"] is None
+                else json.loads(row["last_decision_json"])
+            ),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    def _row_to_record(
+        self,
+        row: sqlite3.Row,
+        *,
+        include_initiative: bool = True,
+    ) -> dict[str, Any]:
+        record = {
             "id": str(row["id"]),
             "name": str(row["name"]),
             "kind": str(row["kind"]),
@@ -232,6 +319,9 @@ class ObserverManager:
             "created_at": float(row["created_at"]),
             "updated_at": float(row["updated_at"]),
         }
+        if include_initiative:
+            record["initiative"] = self._initiative_record(str(row["id"]))
+        return record
 
     def list(self) -> list[dict[str, Any]]:
         rows = self.store.connection.execute(
@@ -311,7 +401,7 @@ class ObserverManager:
                 self.store.connection.execute("COMMIT")
                 return None
             self.store.connection.execute("COMMIT")
-            return self._row_to_record(row)
+            return self._row_to_record(row, include_initiative=False)
         except BaseException:
             self.store.connection.execute("ROLLBACK")
             raise
@@ -355,13 +445,38 @@ class ObserverManager:
             if current is None:
                 self.store.connection.execute("COMMIT")
                 return False
+
+            initiative_row = self.store.connection.execute(
+                "SELECT * FROM observer_initiative WHERE observer_id=?",
+                (record["id"],),
+            ).fetchone()
+            if initiative_row is None:
+                raise RuntimeError(
+                    f"observer initiative state is missing: {record['id']}"
+                )
+
             previous_digest = current["last_digest"]
             is_initial = previous_digest is None
             changed = is_initial or str(previous_digest) != observation.digest
-            emit = changed and (not is_initial or bool(current["emit_initial"]))
+            candidate_change = changed and (
+                not is_initial or bool(current["emit_initial"])
+            )
             change_count = int(current["change_count"])
-            if emit:
+            decision = None
+            emit = False
+
+            if candidate_change:
                 change_count += 1
+                policy = build_initiative_policy(
+                    str(initiative_row["policy_kind"]),
+                    json.loads(initiative_row["config_json"]),
+                )
+                decision = policy.decide(
+                    now=now,
+                    state=json.loads(initiative_row["state_json"]),
+                )
+                emit = decision.emit
+
             self.store.connection.execute(
                 """
                 UPDATE observers
@@ -381,14 +496,44 @@ class ObserverManager:
                         separators=(",", ":"),
                     ),
                     now,
-                    1 if emit else 0,
+                    1 if candidate_change else 0,
                     now,
                     change_count,
                     now,
                     record["id"],
                 ),
             )
+
+            if decision is not None:
+                decision_json = {
+                    "emit": bool(decision.emit),
+                    "reason": decision.reason,
+                    "metrics": decision.metrics,
+                }
+                self.store.connection.execute(
+                    """
+                    UPDATE observer_initiative
+                    SET state_json=?, last_decision_json=?, updated_at=?
+                    WHERE observer_id=?
+                    """,
+                    (
+                        json.dumps(
+                            decision.state,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        json.dumps(
+                            decision_json,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        now,
+                        record["id"],
+                    ),
+                )
+
             if emit:
+                assert decision is not None
                 event_id = self.store.request_autonomous_turn(
                     task=(
                         str(current["task"])
@@ -420,6 +565,27 @@ class ObserverManager:
                         "digest": observation.digest,
                         "change_count": change_count,
                         "event_id": event_id,
+                        "initiative_policy": str(
+                            initiative_row["policy_kind"]
+                        ),
+                        "initiative_reason": decision.reason,
+                        "initiative_metrics": decision.metrics,
+                    },
+                    now=now,
+                )
+            elif decision is not None:
+                self.store.append_journal(
+                    event_type="OBSERVER_CHANGE_SUPPRESSED",
+                    subject_id=record["id"],
+                    payload={
+                        "name": str(current["name"]),
+                        "digest": observation.digest,
+                        "change_count": change_count,
+                        "initiative_policy": str(
+                            initiative_row["policy_kind"]
+                        ),
+                        "initiative_reason": decision.reason,
+                        "initiative_metrics": decision.metrics,
                     },
                     now=now,
                 )
@@ -478,8 +644,16 @@ class ObserverManager:
                     now=now,
                 )
                 continue
-            if self._record_observation(record, observation, now=now):
-                emitted += 1
+            try:
+                if self._record_observation(record, observation, now=now):
+                    emitted += 1
+            except Exception as exc:
+                errors += 1
+                self._record_error(
+                    record,
+                    error=f"{type(exc).__name__}: {exc}",
+                    now=now,
+                )
         return ObserverTickResult(sampled=sampled, emitted=emitted, errors=errors)
 
     def snapshot(self, *, now: float) -> dict[str, Any]:

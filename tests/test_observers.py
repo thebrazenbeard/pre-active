@@ -1,6 +1,8 @@
 import argparse
 from pathlib import Path
 
+import pytest
+
 from pre_active.context import ContextAssembler
 from pre_active.daemon import Daemon
 from pre_active.engine import Engine, ModelResponse
@@ -261,3 +263,216 @@ def test_observer_cli_round_trip_and_status_snapshot(
     assert main(["--state", str(state), "observer", "remove", "cli-file"]) == 0
     removed = __import__("json").loads(capsys.readouterr().out)
     assert removed == {"name": "cli-file", "removed": True}
+
+
+
+def test_hawkes_initiative_suppresses_first_change_then_emits_burst(
+    tmp_path: Path,
+) -> None:
+    watched = tmp_path / "bursty.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observer_id = observers.add_file(
+        name="bursty-file",
+        path=str(watched),
+        task="Review a meaningful burst of file changes.",
+        capabilities={"files.read"},
+        every_seconds=0.1,
+        now=0.0,
+        initiative_policy="hawkes_threshold",
+        initiative_config={
+            "baseline_rate": 0.1,
+            "excitation": 0.4,
+            "decay_rate": 1.0,
+            "wake_threshold": 0.7,
+            "cooldown_seconds": 0.0,
+        },
+    )
+
+    baseline = observers.tick(now=0.0)
+    assert baseline.sampled == 1
+    assert baseline.emitted == 0
+    assert store.list_events(kind="autonomous.turn") == []
+
+    watched.write_text("beta", encoding="utf-8")
+    first_change = observers.tick(now=0.1)
+    assert first_change.sampled == 1
+    assert first_change.emitted == 0
+    assert store.list_events(kind="autonomous.turn") == []
+
+    after_first = observers.get("bursty-file")
+    assert after_first["change_count"] == 1
+    assert after_first["initiative"]["policy_kind"] == "hawkes_threshold"
+    assert after_first["initiative"]["state"]["excitation"] == pytest.approx(0.4)
+    assert after_first["initiative"]["last_decision"]["reason"] == "below_threshold"
+
+    watched.write_text("gamma", encoding="utf-8")
+    second_change = observers.tick(now=0.2)
+    assert second_change.sampled == 1
+    assert second_change.emitted == 1
+
+    [event] = store.list_events(kind="autonomous.turn")
+    assert event["payload"]["source"] == "EXTERNAL"
+    record = observers.get("bursty-file")
+    assert record["change_count"] == 2
+    assert record["initiative"]["state"]["excitation"] > 0.4
+    assert record["initiative"]["last_decision"]["reason"] == "threshold_met"
+
+    event_types = [
+        item["event_type"]
+        for item in store.list_journal(subject_id=observer_id)
+    ]
+    assert "OBSERVER_CHANGE_SUPPRESSED" in event_types
+    assert "OBSERVER_CHANGE_DETECTED" in event_types
+    store.close()
+
+
+
+def test_observer_cli_configures_generic_initiative_policy(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    state = tmp_path / "initiative-cli.db"
+    watched = tmp_path / "initiative-cli.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 100.0)
+    config_json = (
+        '{"baseline_rate":0.1,"excitation":0.4,"decay_rate":1.0,'
+        '"wake_threshold":0.7,"cooldown_seconds":2.0}'
+    )
+
+    assert main([
+        "--state", str(state),
+        "observer", "add-file",
+        "initiative-cli", str(watched),
+        "Review clustered changes.",
+        "--every", "1",
+        "--initiative-policy", "hawkes_threshold",
+        "--initiative-config-json", config_json,
+    ]) == 0
+    created = __import__("json").loads(capsys.readouterr().out)
+    assert created["initiative"]["policy_kind"] == "hawkes_threshold"
+    assert created["initiative"]["config"]["wake_threshold"] == pytest.approx(0.7)
+
+    with pytest.raises(
+        SystemExit,
+        match="--initiative-config-json must decode to a JSON object",
+    ):
+        main([
+            "--state", str(state),
+            "observer", "add-file",
+            "bad-initiative", str(watched),
+            "Reject invalid policy config.",
+            "--every", "1",
+            "--initiative-config-json", "[]",
+        ])
+
+
+
+def test_corrupt_initiative_policy_does_not_block_other_due_observers(
+    tmp_path: Path,
+) -> None:
+    class Stable:
+        def sample(self, config):  # type: ignore[no-untyped-def]
+            value = config["value"]
+            return Observation(
+                digest=f"digest-{value}",
+                summary=f"source {value} changed",
+                evidence={"value": value},
+            )
+
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store, adapters={"stable": Stable()})
+    corrupt_id = observers.add(
+        name="a-corrupt",
+        kind="stable",
+        config={"value": 1},
+        task="Corrupt policy must fail closed.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+    )
+    observers.add(
+        name="z-stable",
+        kind="stable",
+        config={"value": 2},
+        task="Stable policy should still run.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+    )
+    store.connection.execute(
+        "UPDATE observer_initiative SET policy_kind='missing-policy' "
+        "WHERE observer_id=?",
+        (corrupt_id,),
+    )
+
+    result = observers.tick(now=0.0)
+    assert result.sampled == 2
+    assert result.errors == 1
+    assert result.emitted == 1
+    assert observers.get("a-corrupt")["last_digest"] is None
+    assert "unknown initiative policy" in observers.get("a-corrupt")["last_error"]
+    [event] = store.list_events(kind="autonomous.turn")
+    assert "Observer z-stable detected change" in event["payload"]["reason"]
+    store.close()
+
+
+
+def test_corrupt_initiative_json_does_not_block_other_due_observers(
+    tmp_path: Path,
+) -> None:
+    class Stable:
+        def sample(self, config):  # type: ignore[no-untyped-def]
+            value = config["value"]
+            return Observation(
+                digest=f"digest-{value}",
+                summary=f"source {value} changed",
+                evidence={"value": value},
+            )
+
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store, adapters={"stable": Stable()})
+    corrupt_id = observers.add(
+        name="a-corrupt-json",
+        kind="stable",
+        config={"value": 1},
+        task="Corrupt initiative state must fail closed.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+    )
+    observers.add(
+        name="z-stable-json-peer",
+        kind="stable",
+        config={"value": 2},
+        task="Stable policy should still run.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+    )
+    store.connection.execute(
+        "UPDATE observer_initiative SET state_json='{' WHERE observer_id=?",
+        (corrupt_id,),
+    )
+
+    result = observers.tick(now=0.0)
+
+    assert result.sampled == 2
+    assert result.errors == 1
+    assert result.emitted == 1
+    assert "JSONDecodeError" in (
+        store.connection.execute(
+            "SELECT last_error FROM observers WHERE id=?",
+            (corrupt_id,),
+        ).fetchone()["last_error"]
+    )
+    [event] = store.list_events(kind="autonomous.turn")
+    assert "Observer z-stable-json-peer detected change" in event["payload"]["reason"]
+    store.close()

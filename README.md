@@ -184,6 +184,46 @@ pre-active --state .pre-active/state.db autonomous-turn \
   --reason "A monitored pull request changed from green to red"
 ```
 
+### Observer initiative policies
+
+Durable observers default to `on_change`: every eligible snapshot change grants an
+external autonomous turn. An observer may instead attach a durable initiative policy
+that scores real observed changes before a turn is emitted.
+
+The first stochastic policy is `hawkes_threshold`, a configured subcritical
+exponential-Hawkes conditional-intensity gate:
+
+```bash
+pre-active --state .pre-active/state.db observer add-file \
+  source-watch /path/to/source.dat \
+  "Review a meaningful burst of source changes." \
+  --every 5 \
+  --initiative-policy hawkes_threshold \
+  --initiative-config-json \
+  '{"baseline_rate":0.02,"excitation":0.2,"decay_rate":0.5,"wake_threshold":0.3,"cooldown_seconds":30}'
+```
+
+Rates and decay use seconds because observer timestamps are expressed in seconds.
+`excitation / decay_rate` must be less than `1`; supercritical configurations
+fail closed. Suppressed changes still update durable excitation state, allowing a
+cluster of individually weak changes to cross the wake threshold. Cooldown is a
+separate deterministic refractory control rather than negative Hawkes excitation.
+
+This policy is not a fitted Hawkes estimator and does not generate synthetic events.
+It computes a conditional-intensity score over changes actually reported by an
+authorized observer. For snapshot observers, those event times are detection/poll
+times; multiple underlying changes between polls may collapse into one detection.
+The policy therefore does not establish that the underlying source follows a Hawkes
+process. The default remains deterministic `on_change`.
+
+```text
+TEMPORAL MODEL != IMPORTANCE != MODEL TURN != CAPABILITY != EFFECT AUTHORITY
+```
+
+See
+[docs/specs/2026-10-06-temporal-initiative-models-design.md](docs/specs/2026-10-06-temporal-initiative-models-design.md)
+for the research boundary and deferred model families.
+
 Schedule recurring autonomous cognition:
 
 ```bash
