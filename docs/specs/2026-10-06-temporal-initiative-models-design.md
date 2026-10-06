@@ -31,6 +31,8 @@ Create `src/pre_active/initiative.py` with a small policy contract:
 
 The Hawkes policy is an evidence/initiative model, not an effect-authority mechanism and not a random event generator. It computes a conditional-intensity score from actual observed changes; a deterministic policy threshold decides whether a model turn is warranted.
 
+For snapshot observers, the event time is the observer's detection/poll time, not necessarily the underlying source-change time. Multiple source changes between polls may collapse into one observed detection. The V1 policy therefore scores the observed detection stream; it does not establish that the underlying source follows a Hawkes process and it is not a Hawkes parameter estimator.
+
 ## Hawkes state
 
 Configuration:
