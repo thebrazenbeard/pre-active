@@ -135,6 +135,16 @@ class ObserverManager:
         }
         if adapters:
             self.adapters.update(adapters)
+        dispatch_table_existed = (
+            self.store.connection.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type='table' AND name='observer_dispatch'
+                """
+            ).fetchone()
+            is not None
+        )
         self.store.connection.executescript(_OBSERVER_SCHEMA)
         self.store.connection.executescript(_INITIATIVE_SCHEMA)
         self.store.connection.executescript(_DISPATCH_SCHEMA)
@@ -148,15 +158,16 @@ class ObserverManager:
             FROM observers
             """
         )
-        self.store.connection.execute(
-            """
-            INSERT OR IGNORE INTO observer_dispatch (
-                observer_id, route_kind, config_json, updated_at
+        if not dispatch_table_existed:
+            self.store.connection.execute(
+                """
+                INSERT OR IGNORE INTO observer_dispatch (
+                    observer_id, route_kind, config_json, updated_at
+                )
+                SELECT id, 'autonomous_turn', '{}', updated_at
+                FROM observers
+                """
             )
-            SELECT id, 'autonomous_turn', '{}', updated_at
-            FROM observers
-            """
-        )
 
     @staticmethod
     def _validate_dispatch(
@@ -396,7 +407,12 @@ class ObserverManager:
             "updated_at": float(row["updated_at"]),
         }
 
-    def _dispatch_record(self, observer_id: str) -> dict[str, Any]:
+    def _dispatch_record(
+        self,
+        observer_id: str,
+        *,
+        tolerate_corrupt: bool = False,
+    ) -> dict[str, Any]:
         row = self.store.connection.execute(
             "SELECT * FROM observer_dispatch WHERE observer_id=?",
             (observer_id,),
@@ -405,9 +421,26 @@ class ObserverManager:
             raise RuntimeError(
                 f"observer dispatch state is missing: {observer_id}"
             )
-        config = json.loads(row["config_json"])
+        try:
+            config = json.loads(row["config_json"])
+        except json.JSONDecodeError as exc:
+            if not tolerate_corrupt:
+                raise
+            return {
+                "route_kind": str(row["route_kind"]),
+                "config": None,
+                "updated_at": float(row["updated_at"]),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         if not isinstance(config, dict):
-            raise RuntimeError("observer dispatch config must be an object")
+            if not tolerate_corrupt:
+                raise RuntimeError("observer dispatch config must be an object")
+            return {
+                "route_kind": str(row["route_kind"]),
+                "config": None,
+                "updated_at": float(row["updated_at"]),
+                "error": "RuntimeError: observer dispatch config must be an object",
+            }
         return {
             "route_kind": str(row["route_kind"]),
             "config": config,
@@ -420,6 +453,7 @@ class ObserverManager:
         *,
         include_initiative: bool = True,
         include_dispatch: bool = True,
+        tolerate_dispatch_error: bool = False,
     ) -> dict[str, Any]:
         record = {
             "id": str(row["id"]),
@@ -451,14 +485,20 @@ class ObserverManager:
         if include_initiative:
             record["initiative"] = self._initiative_record(str(row["id"]))
         if include_dispatch:
-            record["dispatch"] = self._dispatch_record(str(row["id"]))
+            record["dispatch"] = self._dispatch_record(
+                str(row["id"]),
+                tolerate_corrupt=tolerate_dispatch_error,
+            )
         return record
 
     def list(self) -> list[dict[str, Any]]:
         rows = self.store.connection.execute(
             "SELECT * FROM observers ORDER BY name ASC"
         ).fetchall()
-        return [self._row_to_record(row) for row in rows]
+        return [
+            self._row_to_record(row, tolerate_dispatch_error=True)
+            for row in rows
+        ]
 
     def get(self, name: str) -> dict[str, Any]:
         row = self.store.connection.execute(
@@ -470,6 +510,12 @@ class ObserverManager:
         return self._row_to_record(row)
 
     def set_enabled(self, name: str, *, enabled: bool, now: float) -> None:
+        row = self.store.connection.execute(
+            "SELECT id FROM observers WHERE name=?",
+            (name,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(name)
         cursor = self.store.connection.execute(
             "UPDATE observers SET enabled=?, updated_at=? WHERE name=?",
             (1 if enabled else 0, now, name),
@@ -478,13 +524,18 @@ class ObserverManager:
             raise KeyError(name)
         self.store.append_journal(
             event_type="OBSERVER_ENABLED" if enabled else "OBSERVER_DISABLED",
-            subject_id=self.get(name)["id"],
+            subject_id=str(row["id"]),
             payload={"name": name},
             now=now,
         )
 
     def remove(self, name: str, *, now: float) -> None:
-        record = self.get(name)
+        row = self.store.connection.execute(
+            "SELECT id FROM observers WHERE name=?",
+            (name,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(name)
         cursor = self.store.connection.execute(
             "DELETE FROM observers WHERE name=?",
             (name,),
@@ -493,7 +544,7 @@ class ObserverManager:
             raise KeyError(name)
         self.store.append_journal(
             event_type="OBSERVER_REMOVED",
-            subject_id=record["id"],
+            subject_id=str(row["id"]),
             payload={"name": name},
             now=now,
         )

@@ -524,10 +524,7 @@ def test_observer_dispatch_backfills_existing_observer(tmp_path: Path) -> None:
         now=2.0,
     )
 
-    store.connection.execute(
-        "DELETE FROM observer_dispatch WHERE observer_id=?",
-        (observers.get("dispatch-backfill")["id"],),
-    )
+    store.connection.execute("DROP TABLE observer_dispatch")
     reloaded = ObserverManager(store)
     assert reloaded.get("dispatch-backfill")["dispatch"] == {
         "route_kind": "autonomous_turn",
@@ -1208,4 +1205,112 @@ def test_volition_dispatch_corrupt_capabilities_fail_closed_without_signal(
     assert "volition_signal observers cannot have capabilities" in raw["last_error"]
     assert store.list_events(kind="volition.signal") == []
     assert store.list_events(kind="autonomous.turn") == []
+    store.close()
+
+
+def test_missing_dispatch_row_is_not_backfilled_after_dispatch_schema_exists(
+    tmp_path: Path,
+) -> None:
+    class Stable:
+        def sample(self, config):  # type: ignore[no-untyped-def]
+            return Observation(
+                digest="stable-digest",
+                summary="stable source changed",
+                evidence={"value": 1},
+            )
+
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store, adapters={"stable": Stable()})
+    observer_id = observers.add(
+        name="missing-dispatch-row",
+        kind="stable",
+        config={},
+        task="Compatibility-only task.",
+        capabilities=set(),
+        every_seconds=10,
+        emit_initial=True,
+        now=0.0,
+        dispatch_route="volition_signal",
+        dispatch_config=_volition_dispatch_config("missing-row"),
+    )
+    store.connection.execute(
+        "DELETE FROM observer_dispatch WHERE observer_id=?",
+        (observer_id,),
+    )
+
+    reloaded = ObserverManager(store, adapters={"stable": Stable()})
+    row = store.connection.execute(
+        "SELECT COUNT(*) AS n FROM observer_dispatch WHERE observer_id=?",
+        (observer_id,),
+    ).fetchone()
+    assert row is not None
+    assert int(row["n"]) == 0
+
+    result = reloaded.tick(now=0.0)
+
+    assert result.sampled == 1
+    assert result.emitted == 0
+    assert result.errors == 1
+    raw = store.connection.execute(
+        "SELECT last_digest, change_count, last_error FROM observers WHERE id=?",
+        (observer_id,),
+    ).fetchone()
+    assert raw is not None
+    assert raw["last_digest"] is None
+    assert int(raw["change_count"]) == 0
+    assert "observer dispatch state is missing" in raw["last_error"]
+    assert store.list_events(kind="volition.signal") == []
+    assert store.list_events(kind="autonomous.turn") == []
+    store.close()
+
+
+def test_corrupt_dispatch_can_be_listed_disabled_and_removed(tmp_path: Path) -> None:
+    watched = tmp_path / "dispatch-admin-repair.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observer_id = observers.add_file(
+        name="dispatch-admin-repair",
+        path=str(watched),
+        task="Repair corrupt dispatch state.",
+        capabilities=set(),
+        every_seconds=10,
+        now=0.0,
+    )
+    store.connection.execute(
+        "UPDATE observer_dispatch SET config_json='{' WHERE observer_id=?",
+        (observer_id,),
+    )
+
+    listed = observers.list()
+
+    assert len(listed) == 1
+    assert listed[0]["id"] == observer_id
+    assert listed[0]["dispatch"]["route_kind"] == "autonomous_turn"
+    assert listed[0]["dispatch"]["config"] is None
+    assert "JSONDecodeError" in listed[0]["dispatch"]["error"]
+
+    observers.set_enabled("dispatch-admin-repair", enabled=False, now=1.0)
+    raw = store.connection.execute(
+        "SELECT enabled FROM observers WHERE id=?",
+        (observer_id,),
+    ).fetchone()
+    assert raw is not None
+    assert bool(raw["enabled"]) is False
+    assert any(
+        item["event_type"] == "OBSERVER_DISABLED"
+        for item in store.list_journal(subject_id=observer_id)
+    )
+
+    observers.remove("dispatch-admin-repair", now=2.0)
+    remaining = store.connection.execute(
+        "SELECT COUNT(*) AS n FROM observers WHERE id=?",
+        (observer_id,),
+    ).fetchone()
+    assert remaining is not None
+    assert int(remaining["n"]) == 0
+    assert any(
+        item["event_type"] == "OBSERVER_REMOVED"
+        for item in store.list_journal(subject_id=observer_id)
+    )
     store.close()

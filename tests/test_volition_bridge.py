@@ -540,3 +540,58 @@ def test_bridge_rejects_malformed_observation_context(
     assert store.get_volition_state() is None
     assert store.list_events(kind="autonomous.turn") == []
     store.close()
+
+
+def test_bridge_does_not_attach_context_for_different_active_goal(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+
+    first_payload = _open_loop_payload("goal-A")
+    first_payload["magnitude"] = 0.9
+    first_context = _observation_context()
+    first_context["observer_id"] = "observer-A"
+    first_context["observer_name"] = "observer-A"
+    first_context["digest"] = "digest-A"
+    first_context["summary"] = "Only goal A changed"
+    first_payload["observation_context"] = first_context
+
+    first = _apply_signal(
+        store,
+        bridge,
+        source_event_id="signal-A",
+        payload=first_payload,
+        now=1.0,
+    )
+    assert first["cognition_event_id"] is not None
+
+    second_payload = _open_loop_payload("goal-B")
+    second_payload["magnitude"] = 0.1
+    second_context = _observation_context()
+    second_context["observer_id"] = "observer-B"
+    second_context["observer_name"] = "observer-B"
+    second_context["digest"] = "digest-B"
+    second_context["summary"] = "Only goal B changed"
+    second_payload["observation_context"] = second_context
+
+    second = _apply_signal(
+        store,
+        bridge,
+        source_event_id="signal-B",
+        payload=second_payload,
+        now=2.0,
+    )
+
+    assert second["cognition_event_id"] is not None
+    event = next(
+        item
+        for item in store.list_events(kind="autonomous.turn")
+        if item["id"] == second["cognition_event_id"]
+    )
+    assert event["payload"]["volition"]["target"] == "goal-A"
+    assert event["payload"]["volition"]["signal_event_id"] == "signal-B"
+    assert "observation_context" not in event["payload"]["volition"]
+    assert "Observation context (read-only):" not in event["payload"]["task"]
+    assert "observer-B" not in event["payload"]["task"]
+    store.close()

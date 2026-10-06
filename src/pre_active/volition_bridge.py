@@ -299,7 +299,10 @@ class VolitionBridge:
                 "Do not assume external effect authority.\n\n"
                 f"Goal: {request.target}"
             )
-            if observation_context is not None:
+            if (
+                observation_context is not None
+                and signal.target == request.target
+            ):
                 volition_meta["observation_context"] = observation_context
                 cognition_task += (
                     "\n\nObservation context (read-only):\n"
