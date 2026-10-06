@@ -289,15 +289,15 @@ Push the exact feature branch and open a PR against the exact current `main`.
 
 Run a separate Codex CLI reviewer in a read-only sandbox against the frozen feature diff. Record independent findings separately from internal hostile review. If it finds Important/Critical defects, add red regressions and fix them before promotion; rerun focused independent review of the fix range.
 
-- [ ] **Step 4: Verify exact-head GitHub CI**
+- [x] **Step 4: Verify exact-head GitHub CI**
 
 Require green matrix results for Python 3.11, 3.12, and 3.13 on the exact PR head. Re-read PR head/base/mergeability before merge.
 
-- [ ] **Step 5: Promote to canonical main**
+- [x] **Step 5: Promote to canonical main**
 
 Merge with `expected_head_sha` fencing only when the frozen head and CI/review evidence remain valid. Read back the merge commit and `main`.
 
-- [ ] **Step 6: Deploy without bypassing the existing autonomy window**
+- [x] **Step 6: Deploy without bypassing the existing autonomy window**
 
 At `C:\ProgramData\PreActive`:
 - verify no production daemon/Qwen process is unexpectedly active outside the existing window;
@@ -313,3 +313,31 @@ At `C:\ProgramData\PreActive`:
 ## Unresolved product decisions
 
 None. The approved specification settles the externally observable V1 behavior.
+
+
+## Promotion closure
+
+Final feature head: `50090cdf54b97ea572b8f5d2de36e776ab5cfbd8`
+
+Canonical merge: PR #30 -> `main@a0fb07b7a42f07d29bcbd9ce4e67607f6406814d`
+
+Verification:
+
+- exact feature-head GitHub workflow run #354: success;
+- canonical main push workflow run #355: success;
+- ProgramData source read back at exact canonical merge;
+- production Python full suite: **212 passed in 8.84s**;
+- isolated real-model smoke proved:
+  `file observer -> volition.signal -> ENDOGENOUS autonomous.turn -> completed zero-capability run`;
+- cognition `effect_authority=false`;
+- no direct EXTERNAL observer turn was emitted on the Volition route;
+- duplicate user-local daemon remains disabled;
+- no ProgramData daemon/Qwen process was running outside the configured autonomy window;
+- existing weekday 00:00-14:00 local window policy was preserved;
+- durable deployment receipt:
+  `C:\ProgramData\PreActive\state\OBSERVER_VOLITION_DISPATCH_PROMOTION_20261006.json`.
+
+Independent-review claim remains bounded by
+`docs/reviews/2026-10-06-observer-volition-dispatch-independent-review.md`:
+all concrete independent findings were resolved and independently exercised, but
+the final reviewer did not emit a terminal clean PASS.
