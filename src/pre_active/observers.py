@@ -10,6 +10,7 @@ from typing import Any, Mapping, Protocol
 
 from .initiative import build_initiative_policy
 from .store import Store
+from .volition_bridge import VolitionBridge
 
 
 _OBSERVER_SCHEMA = """
@@ -47,6 +48,15 @@ CREATE TABLE IF NOT EXISTS observer_initiative (
     config_json TEXT NOT NULL,
     state_json TEXT NOT NULL,
     last_decision_json TEXT,
+    updated_at REAL NOT NULL
+);
+"""
+
+_DISPATCH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS observer_dispatch (
+    observer_id TEXT PRIMARY KEY REFERENCES observers(id) ON DELETE CASCADE,
+    route_kind TEXT NOT NULL,
+    config_json TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
 """
@@ -127,6 +137,7 @@ class ObserverManager:
             self.adapters.update(adapters)
         self.store.connection.executescript(_OBSERVER_SCHEMA)
         self.store.connection.executescript(_INITIATIVE_SCHEMA)
+        self.store.connection.executescript(_DISPATCH_SCHEMA)
         self.store.connection.execute(
             """
             INSERT OR IGNORE INTO observer_initiative (
@@ -136,6 +147,44 @@ class ObserverManager:
             SELECT id, 'on_change', '{}', '{}', NULL, updated_at
             FROM observers
             """
+        )
+        self.store.connection.execute(
+            """
+            INSERT OR IGNORE INTO observer_dispatch (
+                observer_id, route_kind, config_json, updated_at
+            )
+            SELECT id, 'autonomous_turn', '{}', updated_at
+            FROM observers
+            """
+        )
+
+    @staticmethod
+    def _validate_dispatch(
+        *,
+        route_kind: str,
+        config: dict[str, Any],
+        capabilities: set[str],
+    ) -> None:
+        if route_kind == "autonomous_turn":
+            if config:
+                raise ValueError("autonomous_turn dispatch config must be empty")
+            return
+        if route_kind != "volition_signal":
+            raise ValueError(f"unknown observer dispatch route: {route_kind}")
+        if capabilities:
+            raise ValueError("volition_signal observers cannot have capabilities")
+        for reserved_key in ("source", "effect_authority", "capabilities", "priority"):
+            if reserved_key in config:
+                raise ValueError(
+                    f"dispatch config cannot contain {reserved_key}"
+                )
+        validator = VolitionBridge.__new__(VolitionBridge)
+        validator.parse_signal_payload(
+            {
+                **config,
+                "source": "observer:validation",
+                "effect_authority": False,
+            }
         )
 
     def add(
@@ -153,6 +202,8 @@ class ObserverManager:
         first_at: float | None = None,
         initiative_policy: str = "on_change",
         initiative_config: dict[str, Any] | None = None,
+        dispatch_route: str = "autonomous_turn",
+        dispatch_config: dict[str, Any] | None = None,
     ) -> str:
         normalized_name = name.strip()
         normalized_kind = kind.strip()
@@ -169,6 +220,15 @@ class ObserverManager:
         build_initiative_policy(
             normalized_initiative_policy,
             initiative_config_value,
+        )
+        normalized_dispatch_route = dispatch_route.strip().lower()
+        if dispatch_config is not None and not isinstance(dispatch_config, dict):
+            raise ValueError("observer dispatch config must be an object")
+        dispatch_config_value = dict(dispatch_config or {})
+        self._validate_dispatch(
+            route_kind=normalized_dispatch_route,
+            config=dispatch_config_value,
+            capabilities=capabilities,
         )
 
         observer_id = str(uuid.uuid4())
@@ -216,6 +276,23 @@ class ObserverManager:
                     now,
                 ),
             )
+            self.store.connection.execute(
+                """
+                INSERT INTO observer_dispatch (
+                    observer_id, route_kind, config_json, updated_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    observer_id,
+                    normalized_dispatch_route,
+                    json.dumps(
+                        dispatch_config_value,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    now,
+                ),
+            )
             self.store.append_journal(
                 event_type="OBSERVER_CONFIGURED",
                 subject_id=observer_id,
@@ -226,6 +303,7 @@ class ObserverManager:
                     "every_seconds": float(every_seconds),
                     "emit_initial": bool(emit_initial),
                     "initiative_policy": normalized_initiative_policy,
+                    "dispatch_route": normalized_dispatch_route,
                 },
                 now=now,
             )
@@ -249,6 +327,8 @@ class ObserverManager:
         first_at: float | None = None,
         initiative_policy: str = "on_change",
         initiative_config: dict[str, Any] | None = None,
+        dispatch_route: str = "autonomous_turn",
+        dispatch_config: dict[str, Any] | None = None,
     ) -> str:
         return self.add(
             name=name,
@@ -263,6 +343,8 @@ class ObserverManager:
             first_at=first_at,
             initiative_policy=initiative_policy,
             initiative_config=initiative_config,
+            dispatch_route=dispatch_route,
+            dispatch_config=dispatch_config,
         )
 
     def _initiative_record(self, observer_id: str) -> dict[str, Any]:
@@ -286,11 +368,30 @@ class ObserverManager:
             "updated_at": float(row["updated_at"]),
         }
 
+    def _dispatch_record(self, observer_id: str) -> dict[str, Any]:
+        row = self.store.connection.execute(
+            "SELECT * FROM observer_dispatch WHERE observer_id=?",
+            (observer_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"observer dispatch state is missing: {observer_id}"
+            )
+        config = json.loads(row["config_json"])
+        if not isinstance(config, dict):
+            raise RuntimeError("observer dispatch config must be an object")
+        return {
+            "route_kind": str(row["route_kind"]),
+            "config": config,
+            "updated_at": float(row["updated_at"]),
+        }
+
     def _row_to_record(
         self,
         row: sqlite3.Row,
         *,
         include_initiative: bool = True,
+        include_dispatch: bool = True,
     ) -> dict[str, Any]:
         record = {
             "id": str(row["id"]),
@@ -321,6 +422,8 @@ class ObserverManager:
         }
         if include_initiative:
             record["initiative"] = self._initiative_record(str(row["id"]))
+        if include_dispatch:
+            record["dispatch"] = self._dispatch_record(str(row["id"]))
         return record
 
     def list(self) -> list[dict[str, Any]]:
@@ -401,7 +504,11 @@ class ObserverManager:
                 self.store.connection.execute("COMMIT")
                 return None
             self.store.connection.execute("COMMIT")
-            return self._row_to_record(row, include_initiative=False)
+            return self._row_to_record(
+                row,
+                include_initiative=False,
+                include_dispatch=False,
+            )
         except BaseException:
             self.store.connection.execute("ROLLBACK")
             raise

@@ -1,6 +1,6 @@
 ﻿# Observer â†’ Volition Dispatch Route V1 Implementation Plan
 
-> **For agentic workers:** Use the host's available task-by-task implementation workflow. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Use the host's available task-by-task implementation workflow. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add an opt-in, mutually exclusive observer dispatch route that emits a typed `volition.signal` instead of a direct `autonomous.turn`, while preserving existing observer behavior and all capability/effect-authority boundaries.
 
@@ -36,7 +36,7 @@
 - Consumes: `ObserverManager.__init__(store, adapters=None)`, `ObserverManager.add(...)`, `ObserverManager.add_file(...)`, existing observer row decoding.
 - Produces: `observer_dispatch(observer_id, route_kind, config_json, updated_at)`, additive `record["dispatch"]`, `dispatch_route="autonomous_turn"`, `dispatch_config=None` parameters on add/add_file.
 
-- [ ] **Step 1: Add focused failing tests**
+- [x] **Step 1: Add focused failing tests**
 
 Add tests proving:
 - manager initialization backfills an existing observer with `{"route_kind":"autonomous_turn","config":{}}`;
@@ -48,7 +48,7 @@ Add tests proving:
 - configuration cannot contain reserved keys `source`, `effect_authority`, `capabilities`, or `priority`;
 - due-observer claiming does not decode dispatch JSON before the per-observer isolated path.
 
-- [ ] **Step 2: Verify the relevant failure**
+- [x] **Step 2: Verify the relevant failure**
 
 Run:
 
@@ -58,7 +58,7 @@ C:\ProgramData\PreActive\python\python.exe -m pytest tests/test_observers.py -k 
 
 Expected: failures show the missing `observer_dispatch` table/read surface and missing route-validation parameters, not import/setup errors.
 
-- [ ] **Step 3: Implement the minimum behavior**
+- [x] **Step 3: Implement the minimum behavior**
 
 In `observers.py`:
 - add `_DISPATCH_SCHEMA` with the exact table from the approved spec;
@@ -75,13 +75,13 @@ In `observers.py`:
 - expose an additive `dispatch` object in normal observer records;
 - preserve the existing `include_initiative=False` claim path pattern by adding an equivalent dispatch-decode guard so malformed dispatch JSON is not decoded during due-ID claiming.
 
-- [ ] **Step 4: Verify the focused pass**
+- [x] **Step 4: Verify the focused pass**
 
 Run the same focused command.
 
 Expected: all dispatch/backfill validation tests pass.
 
-- [ ] **Step 5: Run affected integration checks**
+- [x] **Step 5: Run affected integration checks**
 
 Run:
 

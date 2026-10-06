@@ -476,3 +476,186 @@ def test_corrupt_initiative_json_does_not_block_other_due_observers(
     [event] = store.list_events(kind="autonomous.turn")
     assert "Observer z-stable-json-peer detected change" in event["payload"]["reason"]
     store.close()
+
+
+def _volition_dispatch_config(target: str = "investigate-dispatch") -> dict[str, object]:
+    return {
+        "target": target,
+        "kind": "open_loop",
+        "magnitude": 0.8,
+        "confidence": 1.0,
+        "provenance": "current_observation",
+    }
+
+
+def test_observer_dispatch_defaults_to_autonomous_turn(tmp_path: Path) -> None:
+    watched = tmp_path / "dispatch-default.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observers.add_file(
+        name="dispatch-default",
+        path=str(watched),
+        task="Review default route.",
+        capabilities={"files.read"},
+        every_seconds=10,
+        now=0.0,
+    )
+
+    assert observers.get("dispatch-default")["dispatch"] == {
+        "route_kind": "autonomous_turn",
+        "config": {},
+        "updated_at": 0.0,
+    }
+    store.close()
+
+
+def test_observer_dispatch_backfills_existing_observer(tmp_path: Path) -> None:
+    watched = tmp_path / "dispatch-backfill.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observers.add_file(
+        name="dispatch-backfill",
+        path=str(watched),
+        task="Review backfilled route.",
+        capabilities=set(),
+        every_seconds=10,
+        now=2.0,
+    )
+
+    store.connection.execute(
+        "DELETE FROM observer_dispatch WHERE observer_id=?",
+        (observers.get("dispatch-backfill")["id"],),
+    )
+    reloaded = ObserverManager(store)
+    assert reloaded.get("dispatch-backfill")["dispatch"] == {
+        "route_kind": "autonomous_turn",
+        "config": {},
+        "updated_at": 2.0,
+    }
+    store.close()
+
+
+def test_observer_dispatch_validation_fails_closed_before_insert(tmp_path: Path) -> None:
+    watched = tmp_path / "dispatch-invalid.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+
+    with pytest.raises(ValueError, match="unknown observer dispatch route"):
+        observers.add_file(
+            name="unknown-route",
+            path=str(watched),
+            task="Reject unknown route.",
+            capabilities=set(),
+            every_seconds=10,
+            now=0.0,
+            dispatch_route="missing",
+        )
+
+    with pytest.raises(ValueError, match="autonomous_turn dispatch config must be empty"):
+        observers.add_file(
+            name="direct-config",
+            path=str(watched),
+            task="Reject direct route config.",
+            capabilities=set(),
+            every_seconds=10,
+            now=0.0,
+            dispatch_config={"target": "not-used"},
+        )
+
+    with pytest.raises(ValueError, match="volition_signal observers cannot have capabilities"):
+        observers.add_file(
+            name="volition-capability",
+            path=str(watched),
+            task="Reject capability leakage.",
+            capabilities={"files.read"},
+            every_seconds=10,
+            now=0.0,
+            dispatch_route="volition_signal",
+            dispatch_config=_volition_dispatch_config(),
+        )
+
+    assert observers.list() == []
+    store.close()
+
+
+@pytest.mark.parametrize("reserved_key", ["source", "effect_authority", "capabilities", "priority"])
+def test_volition_dispatch_rejects_reserved_config_keys(
+    tmp_path: Path,
+    reserved_key: str,
+) -> None:
+    watched = tmp_path / f"dispatch-reserved-{reserved_key}.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    config = _volition_dispatch_config()
+    config[reserved_key] = "forbidden"
+
+    with pytest.raises(ValueError, match=f"dispatch config cannot contain {reserved_key}"):
+        observers.add_file(
+            name=f"reserved-{reserved_key}",
+            path=str(watched),
+            task="Reject reserved route field.",
+            capabilities=set(),
+            every_seconds=10,
+            now=0.0,
+            dispatch_route="volition_signal",
+            dispatch_config=config,
+        )
+
+    assert observers.list() == []
+    store.close()
+
+
+def test_volition_dispatch_persists_typed_config(tmp_path: Path) -> None:
+    watched = tmp_path / "dispatch-volition.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    config = _volition_dispatch_config()
+
+    observers.add_file(
+        name="dispatch-volition",
+        path=str(watched),
+        task="Compatibility-only task.",
+        capabilities=set(),
+        every_seconds=10,
+        now=3.0,
+        dispatch_route="volition_signal",
+        dispatch_config=config,
+    )
+
+    assert observers.get("dispatch-volition")["dispatch"] == {
+        "route_kind": "volition_signal",
+        "config": config,
+        "updated_at": 3.0,
+    }
+    store.close()
+
+
+def test_due_claim_does_not_decode_corrupt_dispatch_json(tmp_path: Path) -> None:
+    watched = tmp_path / "dispatch-claim.txt"
+    watched.write_text("alpha", encoding="utf-8")
+    store = Store(tmp_path / "state.db")
+    observers = ObserverManager(store)
+    observer_id = observers.add_file(
+        name="dispatch-claim",
+        path=str(watched),
+        task="Claim without dispatch decode.",
+        capabilities=set(),
+        every_seconds=10,
+        now=0.0,
+    )
+    store.connection.execute(
+        "UPDATE observer_dispatch SET config_json='{' WHERE observer_id=?",
+        (observer_id,),
+    )
+
+    claimed = observers._claim_due(observer_id, now=0.0)
+
+    assert claimed is not None
+    assert claimed["id"] == observer_id
+    assert "dispatch" not in claimed
+    store.close()
