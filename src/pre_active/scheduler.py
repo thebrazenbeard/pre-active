@@ -5,6 +5,7 @@ import uuid
 from typing import Any
 
 from .store import Store
+from .volition_bridge import VolitionBridge
 
 
 class Scheduler:
@@ -31,6 +32,40 @@ class Scheduler:
             (
                 schedule_id,
                 kind,
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                every_seconds,
+                first_at,
+                now,
+                now,
+            ),
+        )
+        return schedule_id
+
+    def add_volition_interval(
+        self,
+        *,
+        config: dict[str, Any],
+        every_seconds: float,
+        first_at: float,
+        now: float,
+    ) -> str:
+        if every_seconds <= 0:
+            raise ValueError("every_seconds must be > 0")
+        schedule_id = str(uuid.uuid4())
+        payload = VolitionBridge.validate_static_signal_config(
+            config,
+            source=f"schedule:{schedule_id}",
+        )
+        self.store.connection.execute(
+            """
+            INSERT INTO schedules (
+                id, kind, payload_json, every_seconds, next_at,
+                enabled, created_at, updated_at
+            )
+            VALUES (?, 'volition.signal', ?, ?, ?, 1, ?, ?)
+            """,
+            (
+                schedule_id,
                 json.dumps(payload, sort_keys=True, separators=(",", ":")),
                 every_seconds,
                 first_at,

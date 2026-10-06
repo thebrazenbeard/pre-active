@@ -107,7 +107,7 @@ git commit -m "refactor: share static Volition signal validation"
 - Consumes: `VolitionBridge.validate_static_signal_config`.
 - Produces: `Scheduler.add_volition_interval(*, config, every_seconds, first_at, now) -> str`.
 
-- [ ] **Step 1: Add focused failing tests**
+- [x] **Step 1: Add focused failing tests**
 
 Prove:
 - valid creation persists one schedule row with `kind=volition.signal`;
@@ -120,7 +120,7 @@ Prove:
 - catch-up over multiple intervals emits each occurrence once;
 - generic `add_interval` schedule behavior remains unchanged.
 
-- [ ] **Step 2: Verify red**
+- [x] **Step 2: Verify red**
 
 Run:
 
@@ -130,7 +130,7 @@ Run:
 
 Expected: failures because `add_volition_interval` does not exist.
 
-- [ ] **Step 3: Implement minimum scheduler helper**
+- [x] **Step 3: Implement minimum scheduler helper**
 
 In `scheduler.py`:
 - import `VolitionBridge`;
@@ -140,13 +140,13 @@ In `scheduler.py`:
 - insert the existing schedule row with `kind="volition.signal"`;
 - preserve existing `tick()` unchanged unless a test demonstrates a required fix.
 
-- [ ] **Step 4: Verify focused green**
+- [x] **Step 4: Verify focused green**
 
 Run the identical command.
 
 Expected: all Volition schedule tests pass.
 
-- [ ] **Step 5: Run scheduler integration**
+- [x] **Step 5: Run scheduler integration**
 
 Run:
 
@@ -156,7 +156,7 @@ Run:
 
 Expected: all scheduler/engine/bridge tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/pre_active/scheduler.py tests/test_scheduler.py
