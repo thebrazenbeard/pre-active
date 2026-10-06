@@ -211,7 +211,10 @@ separate deterministic refractory control rather than negative Hawkes excitation
 
 This policy is not a fitted Hawkes estimator and does not generate synthetic events.
 It computes a conditional-intensity score over changes actually reported by an
-authorized observer. The default remains deterministic `on_change`.
+authorized observer. For snapshot observers, those event times are detection/poll
+times; multiple underlying changes between polls may collapse into one detection.
+The policy therefore does not establish that the underlying source follows a Hawkes
+process. The default remains deterministic `on_change`.
 
 ```text
 TEMPORAL MODEL != IMPORTANCE != MODEL TURN != CAPABILITY != EFFECT AUTHORITY
