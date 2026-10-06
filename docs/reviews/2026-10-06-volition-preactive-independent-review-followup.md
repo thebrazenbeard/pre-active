@@ -95,3 +95,31 @@ The production ProgramData runtime remains governed by the existing weekday
 00:00–14:00 local autonomy window. The duplicate user-local daemon was disabled
 during the preceding cutover. This hotfix must be promoted to canonical `main`
 and redeployed to ProgramData before sustained production activation.
+
+
+## Focused independent re-review
+
+Reviewed hotfix range:
+
+- base: `3749ae0a67fe6e4df8df5c8a50eecb17e5650ce6`
+- hotfix code head: `c7ad96b066b8730589e6f4cab7d3ae0494104fba`
+
+The same separate Codex CLI reviewer ran in a read-only sandbox after the fixes.
+
+It reported **no remaining or new findings**. Both prior findings were resolved:
+
+- P2 clock advancement: resolved.
+- P3 overflow classification: resolved.
+
+The reviewer independently exercised:
+
+- restart restoration and the exact reappraisal horizon;
+- rollback/catch-up without clock double-counting;
+- replay without anchor or cognition-budget mutation;
+- atomic rollback across injected failure stages;
+- positive and negative oversized integers in all six numeric signal fields;
+- zero-capability cognition and denied mutation dispatch.
+
+Focused re-review verdict: **PASS**.
+
+No files were modified by the reviewer.
