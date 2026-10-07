@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS model_targets (
     base_url TEXT NOT NULL,
     model TEXT NOT NULL,
     api_key_env TEXT,
+    provenance_json TEXT,
     is_active INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -221,6 +222,14 @@ class Store:
                 "CREATE UNIQUE INDEX IF NOT EXISTS run_messages_key_idx "
                 "ON run_messages(run_id, message_key) WHERE message_key IS NOT NULL"
             )
+            model_target_columns = {
+                row["name"]
+                for row in self.connection.execute("PRAGMA table_info(model_targets)")
+            }
+            if "provenance_json" not in model_target_columns:
+                self.connection.execute(
+                    "ALTER TABLE model_targets ADD COLUMN provenance_json TEXT"
+                )
             self.connection.execute("COMMIT")
         except BaseException:
             self.connection.execute("ROLLBACK")
@@ -1787,6 +1796,7 @@ class Store:
         base_url: str,
         model: str,
         api_key_env: str | None,
+        provenance: dict[str, Any] | None = None,
         activate: bool,
         now: float,
     ) -> None:
@@ -1813,13 +1823,15 @@ class Store:
             self.connection.execute(
                 """
                 INSERT INTO model_targets
-                    (name, provider, base_url, model, api_key_env, is_active, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (name, provider, base_url, model, api_key_env, provenance_json,
+                     is_active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(name) DO UPDATE SET
                     provider=excluded.provider,
                     base_url=excluded.base_url,
                     model=excluded.model,
                     api_key_env=excluded.api_key_env,
+                    provenance_json=excluded.provenance_json,
                     is_active=excluded.is_active,
                     updated_at=excluded.updated_at
                 """,
@@ -1829,6 +1841,15 @@ class Store:
                     base_url,
                     model,
                     api_key_env,
+                    (
+                        None
+                        if provenance is None
+                        else json.dumps(
+                            provenance,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    ),
                     active_value,
                     created_at,
                     now,
@@ -1842,6 +1863,7 @@ class Store:
                     "base_url": base_url,
                     "model": model,
                     "api_key_env": api_key_env,
+                    "provenance": provenance,
                     "active": bool(active_value),
                 },
                 now=now,
@@ -1854,8 +1876,8 @@ class Store:
     def list_model_targets(self) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             """
-            SELECT name, provider, base_url, model, api_key_env, is_active,
-                   created_at, updated_at
+            SELECT name, provider, base_url, model, api_key_env, provenance_json,
+                   is_active, created_at, updated_at
             FROM model_targets
             ORDER BY name ASC
             """
@@ -1867,6 +1889,11 @@ class Store:
                 "base_url": str(row["base_url"]),
                 "model": str(row["model"]),
                 "api_key_env": row["api_key_env"],
+                "provenance": (
+                    None
+                    if row["provenance_json"] is None
+                    else json.loads(str(row["provenance_json"]))
+                ),
                 "active": bool(row["is_active"]),
                 "created_at": float(row["created_at"]),
                 "updated_at": float(row["updated_at"]),
@@ -1877,8 +1904,8 @@ class Store:
     def get_model_target(self, name: str) -> dict[str, Any] | None:
         row = self.connection.execute(
             """
-            SELECT name, provider, base_url, model, api_key_env, is_active,
-                   created_at, updated_at
+            SELECT name, provider, base_url, model, api_key_env, provenance_json,
+                   is_active, created_at, updated_at
             FROM model_targets WHERE name=?
             """,
             (name,),
@@ -1891,6 +1918,11 @@ class Store:
             "base_url": str(row["base_url"]),
             "model": str(row["model"]),
             "api_key_env": row["api_key_env"],
+            "provenance": (
+                None
+                if row["provenance_json"] is None
+                else json.loads(str(row["provenance_json"]))
+            ),
             "active": bool(row["is_active"]),
             "created_at": float(row["created_at"]),
             "updated_at": float(row["updated_at"]),
@@ -1899,8 +1931,8 @@ class Store:
     def get_active_model_target(self) -> dict[str, Any] | None:
         row = self.connection.execute(
             """
-            SELECT name, provider, base_url, model, api_key_env, is_active,
-                   created_at, updated_at
+            SELECT name, provider, base_url, model, api_key_env, provenance_json,
+                   is_active, created_at, updated_at
             FROM model_targets WHERE is_active=1
             """
         ).fetchone()
@@ -1912,6 +1944,11 @@ class Store:
             "base_url": str(row["base_url"]),
             "model": str(row["model"]),
             "api_key_env": row["api_key_env"],
+            "provenance": (
+                None
+                if row["provenance_json"] is None
+                else json.loads(str(row["provenance_json"]))
+            ),
             "active": True,
             "created_at": float(row["created_at"]),
             "updated_at": float(row["updated_at"]),

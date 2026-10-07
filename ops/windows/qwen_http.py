@@ -9,6 +9,8 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from model_identity import model_provenance
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_DIR = Path(__file__).resolve().parent
@@ -32,6 +34,7 @@ if not MODEL_PATH:
     MODEL_PATH = MODEL_PATH_FILE.read_text(encoding="utf-8").strip()
 if not MODEL_PATH:
     raise RuntimeError("model path binding is empty")
+MODEL_PROVENANCE = model_provenance(MODEL_PATH)
 
 MODEL_ID = os.getenv("PRE_ACTIVE_MODEL_ID", "qwen3.5-4b-local")
 HOST = os.getenv("PRE_ACTIVE_MODEL_HOST", "127.0.0.1")
@@ -174,9 +177,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/v1/models":
+            model_record: dict[str, object] = {
+                "id": MODEL_ID,
+                "object": "model",
+            }
+            if MODEL_PROVENANCE is not None:
+                model_record["provenance"] = MODEL_PROVENANCE
             self.send_json(
                 200,
-                {"object": "list", "data": [{"id": MODEL_ID, "object": "model"}]},
+                {"object": "list", "data": [model_record]},
             )
             return
         self.send_json(404, {"error": "not found"})

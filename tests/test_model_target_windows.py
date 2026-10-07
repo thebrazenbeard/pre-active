@@ -39,6 +39,13 @@ def test_registration_binds_exact_source_into_pinned_python() -> None:
     assert "Failed to bind Pre-Active source into pinned Python" in text
 
 
+def test_qwen_models_endpoint_advertises_model_provenance() -> None:
+    text = (WINDOWS / "qwen_http.py").read_text(encoding="utf-8")
+    assert "model_provenance" in text
+    assert '"provenance"' in text
+    assert "effect_authority" not in text
+
+
 def test_qwen_host_owns_gpu_wait_and_model_path_resolution() -> None:
     text = (WINDOWS / "qwen_http.py").read_text(encoding="utf-8")
     assert "MODEL_PATH_FILE" in text
