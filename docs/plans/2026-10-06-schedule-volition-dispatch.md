@@ -262,7 +262,7 @@ Attack:
 
 Any surviving defect gets a failing regression before its fix.
 
-- [ ] **Step 2: Exact-head local verification**
+- [x] **Step 2: Exact-head local verification**
 
 Run `git diff --check origin/main...HEAD` and full pytest.
 
