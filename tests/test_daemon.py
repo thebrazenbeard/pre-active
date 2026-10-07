@@ -65,3 +65,64 @@ def test_run_forever_survives_retryable_cycle_exception(monkeypatch) -> None:
         daemon.run_forever(poll_seconds=0.01)
 
     assert calls == 2
+
+
+def test_daemon_routes_due_schedule_through_volition_without_temporal_turn(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    scheduler = Scheduler(store)
+    engine = Engine(
+        store=store,
+        model=FinalModel(),
+        tools=ToolRegistry(store),
+        context=ContextAssembler(store),
+        system_prompt="Run tasks.",
+        worker_id="daemon-volition-schedule",
+    )
+    daemon = Daemon(scheduler=scheduler, engine=engine)
+    schedule_id = scheduler.add_volition_interval(
+        config={
+            "target": "scheduled-open-loop-review",
+            "kind": "open_loop",
+            "magnitude": 0.8,
+            "confidence": 1.0,
+            "provenance": "current_observation",
+        },
+        every_seconds=60.0,
+        first_at=10.0,
+        now=1.0,
+    )
+
+    first = daemon.cycle(now=10.0)
+    assert first.emitted_events == 1
+    assert first.run_id is None
+
+    [signal] = store.list_events(kind="volition.signal")
+    assert signal["status"] == "DONE"
+    assert signal["payload"]["source"] == f"schedule:{schedule_id}"
+    assert signal["payload"]["effect_authority"] is False
+
+    [cognition] = store.list_events(kind="autonomous.turn")
+    assert cognition["status"] == "PENDING"
+    assert cognition["payload"]["source"] == "ENDOGENOUS"
+    assert cognition["payload"]["capabilities"] == []
+    assert cognition["payload"]["volition"]["effect_authority"] is False
+    assert not any(
+        event["payload"].get("source") == "TEMPORAL"
+        for event in store.list_events(kind="autonomous.turn")
+    )
+
+    second = daemon.cycle(now=11.0)
+    assert second.run_id is not None
+    run_id = second.run_id
+    run = store.get_run(run_id)
+    assert run["status"] == "RUNNING"
+    assert run["capabilities"] == set()
+
+    third = daemon.cycle(now=12.0)
+    assert third.run_id == run_id
+    completed = store.get_run(run_id)
+    assert completed["status"] == "COMPLETED"
+    assert completed["final_text"] == "scheduled complete"
+    assert completed["capabilities"] == set()

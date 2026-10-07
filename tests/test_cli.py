@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from pre_active.cli import build_parser, main
 from pre_active.store import Store
 
@@ -328,3 +330,121 @@ def test_runtime_cli_exposes_autonomous_turn_budget() -> None:
         "--max-autonomous-turns-per-run", "7",
     ])
     assert args.max_autonomous_turns_per_run == 7
+
+
+def _schedule_volition_config(target: str = "review-open-loops") -> dict[str, object]:
+    return {
+        "target": target,
+        "kind": "open_loop",
+        "magnitude": 0.5,
+        "confidence": 1.0,
+        "provenance": "current_observation",
+    }
+
+
+def test_schedule_parser_exposes_volition_mode() -> None:
+    args = build_parser().parse_args([
+        "schedule",
+        "Compatibility-only task.",
+        "--every",
+        "60",
+    ])
+
+    assert args.volition is False
+    assert args.volition_config_json == "{}"
+
+
+def test_schedule_cli_creates_volition_signal_schedule(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    state = tmp_path / "schedule-volition.db"
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 200.0)
+    config = _schedule_volition_config("scheduled-review")
+
+    assert main([
+        "--state", str(state),
+        "schedule", "Compatibility-only task.",
+        "--every", "60",
+        "--volition",
+        "--volition-config-json", json.dumps(config),
+    ]) == 0
+
+    created = json.loads(capsys.readouterr().out)
+    assert created["first_at"] == 260.0
+    store = Store(state)
+    row = store.connection.execute(
+        "SELECT kind, payload_json, every_seconds, next_at FROM schedules WHERE id=?",
+        (created["schedule_id"],),
+    ).fetchone()
+    assert row is not None
+    assert row["kind"] == "volition.signal"
+    assert json.loads(row["payload_json"]) == {
+        **config,
+        "source": f"schedule:{created['schedule_id']}",
+        "effect_authority": False,
+    }
+    assert float(row["every_seconds"]) == 60.0
+    assert float(row["next_at"]) == 260.0
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "message"),
+    [
+        (["--autonomous"], "--volition cannot be combined with --autonomous"),
+        (["--capability", "files.read"], "--volition schedules cannot have capabilities"),
+        (["--reason", "direct temporal reason"], "--reason is invalid with --volition"),
+    ],
+)
+def test_schedule_cli_rejects_conflicting_volition_modes(
+    tmp_path: Path,
+    monkeypatch,
+    extra_args: list[str],
+    message: str,
+) -> None:
+    state = tmp_path / "schedule-volition-invalid.db"
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 200.0)
+
+    with pytest.raises(SystemExit, match=message):
+        main([
+            "--state", str(state),
+            "schedule", "Compatibility-only task.",
+            "--every", "60",
+            "--volition",
+            "--volition-config-json", json.dumps(_schedule_volition_config()),
+            *extra_args,
+        ])
+
+    store = Store(state)
+    count = store.connection.execute("SELECT COUNT(*) AS n FROM schedules").fetchone()
+    assert count is not None
+    assert int(count["n"]) == 0
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("config_json", "message"),
+    [
+        ("{", "--volition-config-json must be valid JSON"),
+        ("[]", "--volition-config-json must decode to a JSON object"),
+    ],
+)
+def test_schedule_cli_rejects_malformed_volition_config_json(
+    tmp_path: Path,
+    monkeypatch,
+    config_json: str,
+    message: str,
+) -> None:
+    state = tmp_path / "schedule-volition-json.db"
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 200.0)
+
+    with pytest.raises(SystemExit, match=message):
+        main([
+            "--state", str(state),
+            "schedule", "Compatibility-only task.",
+            "--every", "60",
+            "--volition",
+            "--volition-config-json", config_json,
+        ])

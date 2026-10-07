@@ -170,12 +170,13 @@ git commit -m "feat: schedule recurring Volition signals"
 - Modify: `README.md`
 - Test: `tests/test_scheduler.py`
 - Test: `tests/test_cli.py`
+- Test: `tests/test_daemon.py`
 
 **Interfaces:**
 - Consumes: `Scheduler.add_volition_interval`.
 - Produces: `schedule --volition --volition-config-json`.
 
-- [ ] **Step 1: Add focused failing tests**
+- [x] **Step 1: Add focused failing tests**
 
 Prove:
 - parser exposes `--volition` and `--volition-config-json`;
@@ -188,7 +189,7 @@ Prove:
 - end-to-end schedule occurrence → `volition.signal` → ENDOGENOUS cognition → completed zero-capability run;
 - there is no direct TEMPORAL autonomous event in Volition mode.
 
-- [ ] **Step 2: Verify red**
+- [x] **Step 2: Verify red**
 
 Run:
 
@@ -198,7 +199,7 @@ Run:
 
 Expected: failures because the CLI surface is absent.
 
-- [ ] **Step 3: Implement minimum CLI/docs**
+- [x] **Step 3: Implement minimum CLI/docs**
 
 In `cli.py`:
 - add `--volition`;
@@ -213,13 +214,13 @@ In `README.md`:
 - document the authority boundary and ignored compatibility task;
 - include one Volition schedule example.
 
-- [ ] **Step 4: Verify focused green**
+- [x] **Step 4: Verify focused green**
 
 Run the identical focused command.
 
 Expected: all schedule CLI/end-to-end tests pass.
 
-- [ ] **Step 5: Run full local suite**
+- [x] **Step 5: Run full local suite**
 
 Run:
 
@@ -229,7 +230,7 @@ Run:
 
 Expected: complete suite passes.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/pre_active/cli.py README.md tests/test_scheduler.py tests/test_cli.py
