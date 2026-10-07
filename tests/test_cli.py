@@ -351,7 +351,7 @@ def test_schedule_parser_exposes_volition_mode() -> None:
     ])
 
     assert args.volition is False
-    assert args.volition_config_json == "{}"
+    assert args.volition_config_json is None
 
 
 def test_schedule_cli_creates_volition_signal_schedule(
@@ -450,9 +450,14 @@ def test_schedule_cli_rejects_malformed_volition_config_json(
         ])
 
 
+@pytest.mark.parametrize(
+    "config_json",
+    ["{}", json.dumps(_schedule_volition_config())],
+)
 def test_schedule_cli_rejects_volition_config_without_volition_mode(
     tmp_path: Path,
     monkeypatch,
+    config_json: str,
 ) -> None:
     state = tmp_path / "schedule-volition-mode-mismatch.db"
     monkeypatch.setattr("pre_active.cli.time.time", lambda: 200.0)
@@ -465,7 +470,32 @@ def test_schedule_cli_rejects_volition_config_without_volition_mode(
             "--state", str(state),
             "schedule", "This must not silently become ordinary scheduled work.",
             "--every", "60",
-            "--volition-config-json", json.dumps(_schedule_volition_config()),
+            "--volition-config-json", config_json,
+        ])
+
+    store = Store(state)
+    count = store.connection.execute("SELECT COUNT(*) AS n FROM schedules").fetchone()
+    assert count is not None
+    assert int(count["n"]) == 0
+    store.close()
+
+
+def test_schedule_cli_requires_config_flag_in_volition_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state = tmp_path / "schedule-volition-config-required.db"
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 200.0)
+
+    with pytest.raises(
+        SystemExit,
+        match="--volition schedules require --volition-config-json",
+    ):
+        main([
+            "--state", str(state),
+            "schedule", "Compatibility-only task.",
+            "--every", "60",
+            "--volition",
         ])
 
     store = Store(state)

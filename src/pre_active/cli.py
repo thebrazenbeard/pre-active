@@ -134,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit typed Volition signals instead of direct scheduled work",
     )
-    schedule.add_argument("--volition-config-json", default="{}")
+    schedule.add_argument("--volition-config-json")
 
     autonomous = sub.add_parser(
         "autonomous-turn",
@@ -363,11 +363,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "schedule":
             first_at = args.first_at if args.first_at is not None else now + args.every
-            if not args.volition and args.volition_config_json != "{}":
+            if not args.volition and args.volition_config_json is not None:
                 raise SystemExit(
                     "--volition-config-json requires --volition"
                 )
             if args.volition:
+                if args.volition_config_json is None:
+                    raise SystemExit(
+                        "--volition schedules require --volition-config-json"
+                    )
                 if args.autonomous:
                     raise SystemExit(
                         "--volition cannot be combined with --autonomous"

@@ -22,7 +22,9 @@
 - Volition schedules reject capabilities and `--reason`.
 - Scheduler never falls back from Volition to direct autonomous cognition.
 - Recurring Volition schedules coalesce missed occurrences to the latest due occurrence.
-- Non-default Volition CLI config without `--volition` fails closed.
+- Any explicit Volition CLI config without `--volition` fails closed, including `'{}'`.
+- Volition mode requires explicit `--volition-config-json`.
+- Volition timing values are finite; cadence is at least one microsecond and must advance timestamp representation.
 - No temporal-context envelope in V1.
 - Generated cognition remains ENDOGENOUS and zero-capability.
 - Existing Lappy autonomy window is not changed by this feature.
@@ -116,10 +118,10 @@ Prove:
 - payload source is exactly `schedule:<schedule_id>`;
 - payload effect authority is false;
 - stored config cannot contain capabilities/priority/runtime-only fields;
-- invalid config writes no schedule row;
+- invalid config or unsafe timing writes no schedule row;
 - due tick emits one priority-0 `volition.signal` with the existing schedule occurrence dedup key and `available_at=occurrence`;
 - repeated tick at the same timestamp does not duplicate;
-- missed recurring Volition occurrences coalesce to the latest due occurrence while ordinary schedule catch-up remains unchanged;
+- missed recurring Volition occurrences coalesce to the latest due occurrence with fractional-boundary-safe arithmetic while ordinary schedule catch-up remains unchanged;
 - generic `add_interval` schedule behavior remains unchanged.
 
 - [x] **Step 2: Verify red**
@@ -187,7 +189,8 @@ Prove:
 - Volition mode rejects capabilities;
 - Volition mode rejects `--reason`;
 - malformed JSON and non-object JSON get explicit errors;
-- non-default `--volition-config-json` without `--volition` fails closed;
+- any explicit `--volition-config-json` without `--volition` fails closed;
+- `--volition` without an explicit config flag fails closed;
 - valid CLI creation persists the derived schedule source;
 - end-to-end schedule occurrence → `volition.signal` → ENDOGENOUS cognition → completed zero-capability run;
 - there is no direct TEMPORAL autonomous event in Volition mode.

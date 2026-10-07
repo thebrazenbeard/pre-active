@@ -319,8 +319,10 @@ pre-active --state .pre-active/state.db schedule \
   '{"target":"review-open-loops","kind":"open_loop","magnitude":0.5,"confidence":1.0,"provenance":"current_observation"}'
 ```
 
-Volition schedules are mutually exclusive with `--autonomous`, cannot carry
-capabilities or a direct-turn `--reason`, derive
+Volition schedules are mutually exclusive with `--autonomous`, require an
+explicit `--volition-config-json`, reject that flag when Volition mode is absent,
+and cannot carry capabilities or a direct-turn `--reason`. Their timing values
+must be finite and recurring cadence must be at least one microsecond. They derive
 `source=schedule:<schedule_id>`, and force `effect_authority=false`. The
 positional task is retained only for CLI compatibility and is ignored in
 Volition mode. If Volition later requests cognition, that turn is ENDOGENOUS and

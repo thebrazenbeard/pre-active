@@ -119,12 +119,13 @@ Scheduler.add_volition_interval(
 
 Behavior:
 
-1. require `every_seconds > 0`;
-2. generate the schedule UUID;
-3. derive `source=f"schedule:{schedule_id}"`;
-4. validate/normalize the static motive config through
+1. require finite `every_seconds`, `first_at`, and `now`;
+2. require `every_seconds >= 0.000001` seconds so occurrence identities remain distinct at the scheduler's six-decimal dedup precision, and require the interval to advance the current timestamp representation;
+3. generate the schedule UUID;
+4. derive `source=f"schedule:{schedule_id}"`;
+5. validate/normalize the static motive config through
    `VolitionBridge.validate_static_signal_config`;
-5. insert one schedule row:
+6. insert one schedule row:
    - `kind="volition.signal"`;
    - `payload_json=<validated payload>`;
    - existing interval/next_at/enabled timestamps unchanged.
@@ -139,7 +140,9 @@ Ordinary and direct-autonomous schedules preserve their existing catch-up
 semantics. Recurring `volition.signal` schedules deliberately do not replay
 every missed occurrence after downtime. If more than one occurrence is overdue,
 the scheduler coalesces them to the latest due occurrence and advances
-`next_at` to the following interval.
+`next_at` to the following interval. Coalescing uses decimal-stable arithmetic
+from the persisted numeric values rather than binary-float floor division so an
+exact fractional cadence boundary cannot be emitted one tick late.
 
 This prevents the normal daily autonomy-window shutdown (and longer outages)
 from replaying a burst of stale motive signals when the runtime resumes.
@@ -190,7 +193,8 @@ Extend the existing `schedule` command additively:
 Rules:
 
 - existing schedule behavior is unchanged when no Volition-specific option is supplied;
-- providing non-default `--volition-config-json` without `--volition` fails closed;
+- providing `--volition-config-json` at all without `--volition` fails closed, including an explicit `'{}'`;
+- `--volition` requires the `--volition-config-json` flag to be explicitly present;
 - `--volition` and `--autonomous` are mutually exclusive;
 - `--volition` requires `--volition-config-json` to decode to an object
   containing the complete required static motive fields;
@@ -335,8 +339,9 @@ place.
 > `--volition` could silently create ordinary scheduled work instead of the
 > intended motive route.
 
-**Accepted and fixed.** Non-default Volition config without Volition mode now
-fails closed before any schedule row is written.
+**Accepted and fixed.** Any explicitly supplied Volition config, including an
+empty JSON object, fails closed without Volition mode. Volition mode also
+requires the config flag to be explicitly present.
 
 > **HOSTILE REVIEWER:** Volition schedules could accidentally inherit
 > `TEMPORAL` direct-turn semantics and capabilities from the CLI.
@@ -357,7 +362,8 @@ Ready for promotion only when:
 - source is schedule-derived;
 - effect authority is false;
 - event priority is fixed at 0;
-- occurrence dedup remains deterministic and stale Volition occurrences are coalesced;
+- occurrence dedup remains deterministic and stale Volition occurrences are coalesced with fractional-boundary correctness;
+- Volition timing values are finite and cadence is at least one microsecond;
 - mode-specific Volition config cannot be silently ignored;
 - no direct autonomous fallback exists;
 - end-to-end cognition is ENDOGENOUS and zero-capability;
