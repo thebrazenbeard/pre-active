@@ -266,3 +266,8 @@ Hosts can extend Pre-Active through:
 - richer memory retrieval behind the same context boundary;
 - alternate durable stores, provided they preserve lease, idempotency, and recovery semantics;
 - distributed schedulers that preserve schedule occurrence identity.
+
+
+## Donor-derived context admission boundary
+
+A 2026-10-07 donor extraction sharpens the separation `MOTIVE_STATE != TURN_ADMISSION != EFFECT_AUTHORITY`. Runtime refusal or deferral may describe budget, cooldown, provider, contract, pause, or other admission state without proving that an upstream Want/Choice/Goal/conation disappeared. Existing explicit Pre-Active gates remain authoritative; no generic new gate is claimed implemented by this note. See `docs/SEXUALITY_ORGASM_DONOR_TRANSFER_20261007.md`.
