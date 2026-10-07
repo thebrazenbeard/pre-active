@@ -307,6 +307,27 @@ pre-active --state .pre-active/state.db schedule \
   --reason "Periodic reconsideration was explicitly requested"
 ```
 
+Schedule recurring Volition signals when time should create motive evidence
+without granting a direct model turn:
+
+```bash
+pre-active --state .pre-active/state.db schedule \
+  "Compatibility-only task" \
+  --every 3600 \
+  --volition \
+  --volition-config-json \
+  '{"target":"review-open-loops","kind":"open_loop","magnitude":0.5,"confidence":1.0,"provenance":"current_observation"}'
+```
+
+Volition schedules are mutually exclusive with `--autonomous`, require an
+explicit `--volition-config-json`, reject that flag when Volition mode is absent,
+and cannot carry capabilities or a direct-turn `--reason`. Their timing values
+must be finite and recurring cadence must be at least one microsecond. They derive
+`source=schedule:<schedule_id>`, and force `effect_authority=false`. The
+positional task is retained only for CLI compatibility and is ignored in
+Volition mode. If Volition later requests cognition, that turn is ENDOGENOUS and
+zero-capability.
+
 Ordinary scheduled tasks remain available:
 
 ```bash

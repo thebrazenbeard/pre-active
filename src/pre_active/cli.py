@@ -129,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--reason",
         help="why this temporal condition warrants an autonomous model turn",
     )
+    schedule.add_argument(
+        "--volition",
+        action="store_true",
+        help="emit typed Volition signals instead of direct scheduled work",
+    )
+    schedule.add_argument("--volition-config-json")
 
     autonomous = sub.add_parser(
         "autonomous-turn",
@@ -357,29 +363,70 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "schedule":
             first_at = args.first_at if args.first_at is not None else now + args.every
-            kind = "task.requested"
-            payload = {
-                "task": args.task,
-                "capabilities": sorted(set(args.capability)),
-            }
-            if args.autonomous:
-                if not args.reason or not args.reason.strip():
-                    raise SystemExit("--autonomous schedules require --reason")
-                kind = "autonomous.turn"
-                payload.update(
-                    {
-                        "source": "TEMPORAL",
-                        "reason": args.reason.strip(),
-                    }
+            if not args.volition and args.volition_config_json is not None:
+                raise SystemExit(
+                    "--volition-config-json requires --volition"
                 )
-            schedule_id = Scheduler(store).add_interval(
-                kind=kind,
-                payload=payload,
-                every_seconds=args.every,
-                first_at=first_at,
-                now=now,
+            if args.volition:
+                if args.volition_config_json is None:
+                    raise SystemExit(
+                        "--volition schedules require --volition-config-json"
+                    )
+                if args.autonomous:
+                    raise SystemExit(
+                        "--volition cannot be combined with --autonomous"
+                    )
+                if args.capability:
+                    raise SystemExit(
+                        "--volition schedules cannot have capabilities"
+                    )
+                if args.reason is not None:
+                    raise SystemExit("--reason is invalid with --volition")
+                try:
+                    volition_config = json.loads(args.volition_config_json)
+                except json.JSONDecodeError as exc:
+                    raise SystemExit(
+                        "--volition-config-json must be valid JSON"
+                    ) from exc
+                if not isinstance(volition_config, dict):
+                    raise SystemExit(
+                        "--volition-config-json must decode to a JSON object"
+                    )
+                schedule_id = Scheduler(store).add_volition_interval(
+                    config=volition_config,
+                    every_seconds=args.every,
+                    first_at=first_at,
+                    now=now,
+                )
+            else:
+                kind = "task.requested"
+                payload = {
+                    "task": args.task,
+                    "capabilities": sorted(set(args.capability)),
+                }
+                if args.autonomous:
+                    if not args.reason or not args.reason.strip():
+                        raise SystemExit("--autonomous schedules require --reason")
+                    kind = "autonomous.turn"
+                    payload.update(
+                        {
+                            "source": "TEMPORAL",
+                            "reason": args.reason.strip(),
+                        }
+                    )
+                schedule_id = Scheduler(store).add_interval(
+                    kind=kind,
+                    payload=payload,
+                    every_seconds=args.every,
+                    first_at=first_at,
+                    now=now,
+                )
+            print(
+                json.dumps(
+                    {"schedule_id": schedule_id, "first_at": first_at},
+                    sort_keys=True,
+                )
             )
-            print(json.dumps({"schedule_id": schedule_id, "first_at": first_at}, sort_keys=True))
             return 0
         if args.command == "autonomous-turn":
             if args.after < 0:

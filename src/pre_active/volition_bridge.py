@@ -171,23 +171,70 @@ class VolitionBridge:
             },
         }
 
-    def parse_signal_payload(self, payload: dict[str, Any]) -> Any:
+    @classmethod
+    def validate_static_signal_config(
+        cls,
+        config: dict[str, Any],
+        *,
+        source: str,
+        label: str = "static signal config",
+    ) -> dict[str, Any]:
+        if not isinstance(config, dict):
+            raise ValueError(f"{label} must be an object")
+        allowed_fields = {
+            "target",
+            "kind",
+            "magnitude",
+            "confidence",
+            "provenance",
+            "expected_information_gain",
+            "learning_progress",
+            "controllability",
+            "predicted_deficit_reduction",
+            "current_reappraisal",
+        }
+        unsupported = sorted(set(config) - allowed_fields)
+        if unsupported:
+            raise ValueError(
+                f"{label} contains unsupported field: {unsupported[0]}"
+            )
+        for required_key in (
+            "target",
+            "kind",
+            "magnitude",
+            "confidence",
+            "provenance",
+        ):
+            if required_key not in config:
+                raise ValueError(
+                    f"{label} missing required field: {required_key}"
+                )
+        payload = {
+            **config,
+            "source": source,
+            "effect_authority": False,
+        }
+        cls.parse_signal_payload(payload)
+        return payload
+
+    @classmethod
+    def parse_signal_payload(cls, payload: dict[str, Any]) -> Any:
         if not isinstance(payload, dict):
             raise InvalidVolitionSignal("volition signal payload must be an object")
         if payload.get("effect_authority", False) is not False:
             raise InvalidVolitionSignal("volition signal cannot claim effect authority")
-        self._observation_context(payload)
+        cls._observation_context(payload)
 
         DriveKind, ProvenanceClass, Signal, _ = _load_volition()
-        target = self._text(payload, "target")
-        source = self._text(payload, "source")
+        target = cls._text(payload, "target")
+        source = cls._text(payload, "source")
 
         try:
-            kind = DriveKind(self._text(payload, "kind"))
+            kind = DriveKind(cls._text(payload, "kind"))
         except ValueError as exc:
             raise InvalidVolitionSignal("volition signal kind is unsupported") from exc
         try:
-            provenance = ProvenanceClass(self._text(payload, "provenance"))
+            provenance = ProvenanceClass(cls._text(payload, "provenance"))
         except ValueError as exc:
             raise InvalidVolitionSignal("volition signal provenance is unsupported") from exc
 
@@ -198,17 +245,16 @@ class VolitionBridge:
         return Signal(
             target=target,
             kind=kind,
-            magnitude=self._number(payload, "magnitude"),
-            confidence=self._number(payload, "confidence", default=1.0),
+            magnitude=cls._number(payload, "magnitude"),
+            confidence=cls._number(payload, "confidence", default=1.0),
             provenance=provenance,
             source=source,
-            expected_information_gain=self._number(
+            expected_information_gain=cls._number(
                 payload, "expected_information_gain", default=0.0
             ),
-
-            learning_progress=self._number(payload, "learning_progress", default=0.0),
-            controllability=self._number(payload, "controllability", default=1.0),
-            predicted_deficit_reduction=self._number(
+            learning_progress=cls._number(payload, "learning_progress", default=0.0),
+            controllability=cls._number(payload, "controllability", default=1.0),
+            predicted_deficit_reduction=cls._number(
                 payload, "predicted_deficit_reduction", default=1.0
             ),
             current_reappraisal=current_reappraisal,
