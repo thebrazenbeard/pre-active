@@ -21,6 +21,8 @@
 - `--volition` is mutually exclusive with `--autonomous`.
 - Volition schedules reject capabilities and `--reason`.
 - Scheduler never falls back from Volition to direct autonomous cognition.
+- Recurring Volition schedules coalesce missed occurrences to the latest due occurrence.
+- Non-default Volition CLI config without `--volition` fails closed.
 - No temporal-context envelope in V1.
 - Generated cognition remains ENDOGENOUS and zero-capability.
 - Existing Lappy autonomy window is not changed by this feature.
@@ -117,7 +119,7 @@ Prove:
 - invalid config writes no schedule row;
 - due tick emits one priority-0 `volition.signal` with the existing schedule occurrence dedup key and `available_at=occurrence`;
 - repeated tick at the same timestamp does not duplicate;
-- catch-up over multiple intervals emits each occurrence once;
+- missed recurring Volition occurrences coalesce to the latest due occurrence while ordinary schedule catch-up remains unchanged;
 - generic `add_interval` schedule behavior remains unchanged.
 
 - [x] **Step 2: Verify red**
@@ -185,6 +187,7 @@ Prove:
 - Volition mode rejects capabilities;
 - Volition mode rejects `--reason`;
 - malformed JSON and non-object JSON get explicit errors;
+- non-default `--volition-config-json` without `--volition` fails closed;
 - valid CLI creation persists the derived schedule source;
 - end-to-end schedule occurrence → `volition.signal` → ENDOGENOUS cognition → completed zero-capability run;
 - there is no direct TEMPORAL autonomous event in Volition mode.
@@ -245,7 +248,7 @@ git commit -m "feat: expose scheduled Volition signals in CLI"
 - Modify: this implementation plan
 - Deployment receipt: `C:\ProgramData\PreActive\state\SCHEDULE_VOLITION_DISPATCH_PROMOTION_20261006.json`
 
-- [ ] **Step 1: Internal hostile review**
+- [x] **Step 1: Internal hostile review**
 
 Attack:
 - source/effect/capability/priority injection;

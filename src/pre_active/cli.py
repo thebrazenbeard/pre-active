@@ -363,6 +363,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "schedule":
             first_at = args.first_at if args.first_at is not None else now + args.every
+            if not args.volition and args.volition_config_json != "{}":
+                raise SystemExit(
+                    "--volition-config-json requires --volition"
+                )
             if args.volition:
                 if args.autonomous:
                     raise SystemExit(

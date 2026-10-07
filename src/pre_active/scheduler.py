@@ -86,6 +86,16 @@ class Scheduler:
             interval = row["every_seconds"]
             if interval is None:
                 occurrences = [next_at]
+            elif str(row["kind"]) == "volition.signal":
+                if emitted >= max_occurrences:
+                    break
+                interval_value = float(interval)
+                skipped = int((now - next_at) // interval_value)
+                occurrence = next_at + (skipped * interval_value)
+                if occurrence > now:
+                    occurrence -= interval_value
+                occurrences = [occurrence]
+                next_at = occurrence + interval_value
             else:
                 occurrences = []
                 while next_at <= now and emitted + len(occurrences) < max_occurrences:

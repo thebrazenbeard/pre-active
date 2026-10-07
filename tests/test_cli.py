@@ -448,3 +448,28 @@ def test_schedule_cli_rejects_malformed_volition_config_json(
             "--volition",
             "--volition-config-json", config_json,
         ])
+
+
+def test_schedule_cli_rejects_volition_config_without_volition_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state = tmp_path / "schedule-volition-mode-mismatch.db"
+    monkeypatch.setattr("pre_active.cli.time.time", lambda: 200.0)
+
+    with pytest.raises(
+        SystemExit,
+        match="--volition-config-json requires --volition",
+    ):
+        main([
+            "--state", str(state),
+            "schedule", "This must not silently become ordinary scheduled work.",
+            "--every", "60",
+            "--volition-config-json", json.dumps(_schedule_volition_config()),
+        ])
+
+    store = Store(state)
+    count = store.connection.execute("SELECT COUNT(*) AS n FROM schedules").fetchone()
+    assert count is not None
+    assert int(count["n"]) == 0
+    store.close()

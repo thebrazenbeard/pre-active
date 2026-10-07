@@ -135,7 +135,16 @@ The generic `add_interval` API remains behavior-compatible for existing callers.
 
 `Scheduler.tick()` remains the sole occurrence emitter.
 
-Each due occurrence creates one durable event:
+Ordinary and direct-autonomous schedules preserve their existing catch-up
+semantics. Recurring `volition.signal` schedules deliberately do not replay
+every missed occurrence after downtime. If more than one occurrence is overdue,
+the scheduler coalesces them to the latest due occurrence and advances
+`next_at` to the following interval.
+
+This prevents the normal daily autonomy-window shutdown (and longer outages)
+from replaying a burst of stale motive signals when the runtime resumes.
+
+Each emitted Volition occurrence creates one durable event:
 
 ```text
 kind = volition.signal
@@ -146,7 +155,9 @@ available_at = scheduled occurrence timestamp
 dedup_key = schedule:<schedule_id>:<occurrence timestamp>
 ```
 
-The existing scheduler dedup identity remains unchanged.
+The existing scheduler dedup identity remains unchanged for the occurrence
+that is actually emitted. Coalesced stale occurrences intentionally create no
+events.
 
 No direct `autonomous.turn` is created by the scheduler in Volition mode.
 The ordinary engine later processes the `volition.signal`; if Volition requests
@@ -178,7 +189,8 @@ Extend the existing `schedule` command additively:
 
 Rules:
 
-- existing schedule behavior is unchanged when `--volition` is absent;
+- existing schedule behavior is unchanged when no Volition-specific option is supplied;
+- providing non-default `--volition-config-json` without `--volition` fails closed;
 - `--volition` and `--autonomous` are mutually exclusive;
 - `--volition` requires `--volition-config-json` to decode to an object
   containing the complete required static motive fields;
@@ -273,7 +285,8 @@ Required coverage:
    derived source and forced false effect authority;
 5. no caller-supplied capability/priority/source/effect field can enter that
    payload;
-6. due occurrences preserve existing dedup and catch-up semantics;
+6. due Volition occurrences preserve existing dedup identity while coalescing
+   missed recurring occurrences to the latest due occurrence;
 7. repeated tick at the same time does not duplicate events;
 8. Volition schedule event priority is 0;
 9. existing generic scheduler tests remain unchanged and green;
@@ -294,6 +307,14 @@ scheduler is intentionally low-level. The CLI and documented integration need a
 closed contract that derives authority-sensitive fields rather than trusting
 arbitrary payloads.
 
+> **HOSTILE REVIEWER:** Preserving ordinary catch-up semantics will replay every
+> missed motive after the daily autonomy-window shutdown and can amplify stale
+> temporal intent into a burst.
+
+**Accepted and fixed.** Recurring Volition schedules coalesce all missed
+occurrences to the latest due occurrence. Ordinary and direct-autonomous schedule
+catch-up remains unchanged.
+
 > **HOSTILE REVIEWER:** A temporal signal with no dynamic context is too weak to
 > be useful.
 
@@ -309,6 +330,13 @@ binding risks without evidence that it is needed.
 the current API. Occurrence identity is already schedule ID plus occurrence
 timestamp. V1 adds no update/mutation API that can change a schedule route in
 place.
+
+> **HOSTILE REVIEWER:** Supplying `--volition-config-json` without
+> `--volition` could silently create ordinary scheduled work instead of the
+> intended motive route.
+
+**Accepted and fixed.** Non-default Volition config without Volition mode now
+fails closed before any schedule row is written.
 
 > **HOSTILE REVIEWER:** Volition schedules could accidentally inherit
 > `TEMPORAL` direct-turn semantics and capabilities from the CLI.
@@ -329,7 +357,8 @@ Ready for promotion only when:
 - source is schedule-derived;
 - effect authority is false;
 - event priority is fixed at 0;
-- occurrence dedup remains deterministic;
+- occurrence dedup remains deterministic and stale Volition occurrences are coalesced;
+- mode-specific Volition config cannot be silently ignored;
 - no direct autonomous fallback exists;
 - end-to-end cognition is ENDOGENOUS and zero-capability;
 - exact-head local suite is green;
