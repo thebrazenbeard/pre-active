@@ -14,6 +14,7 @@ from .daemon import Daemon
 from .engine import Engine
 from .observers import ObserverManager
 from .model_targets import (
+    ModelProvenance,
     ModelTarget,
     TargetResolvingModelAdapter,
     probe_model_target,
@@ -216,6 +217,8 @@ def build_parser() -> argparse.ArgumentParser:
     target_set.add_argument("--base-url", required=True)
     target_set.add_argument("--model", required=True)
     target_set.add_argument("--api-key-env")
+    target_set.add_argument("--base-model-revision")
+    target_set.add_argument("--adapter-model-sha256")
     target_set.add_argument("--activate", action="store_true")
 
     target_sub.add_parser("list", help="list configured local model targets")
@@ -614,12 +617,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise AssertionError(args.checkpoint_command)
         if args.command == "target":
             if args.target_command == "set":
+                if args.adapter_model_sha256 and not args.base_model_revision:
+                    raise SystemExit(
+                        "--adapter-model-sha256 requires --base-model-revision"
+                    )
+                provenance = (
+                    None
+                    if not args.base_model_revision
+                    else ModelProvenance(
+                        base_model_revision=args.base_model_revision,
+                        adapter_active=bool(args.adapter_model_sha256),
+                        adapter_model_sha256=args.adapter_model_sha256,
+                    )
+                )
                 target = ModelTarget(
                     name=args.name,
                     provider=args.provider,
                     base_url=args.base_url,
                     model=args.model,
                     api_key_env=args.api_key_env,
+                    provenance=provenance,
                 )
                 store.upsert_model_target(
                     name=target.name,
@@ -627,6 +644,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     base_url=target.base_url,
                     model=target.model,
                     api_key_env=target.api_key_env,
+                    provenance=(
+                        None
+                        if target.provenance is None
+                        else target.provenance.to_mapping()
+                    ),
                     activate=args.activate,
                     now=now,
                 )

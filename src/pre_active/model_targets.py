@@ -3,11 +3,62 @@ from __future__ import annotations
 from dataclasses import dataclass
 import ipaddress
 import json
+import re
 from typing import Mapping
 from urllib import error, parse, request
 
 from .store import Store
 from .providers.openai_compatible import OpenAICompatibleAdapter
+
+
+@dataclass(frozen=True)
+class ModelProvenance:
+    base_model_revision: str
+    adapter_active: bool
+    adapter_model_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        revision = self.base_model_revision.strip()
+        if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            raise ValueError("base_model_revision must be 40 lowercase hex characters")
+        adapter_sha = (
+            self.adapter_model_sha256.strip()
+            if isinstance(self.adapter_model_sha256, str)
+            else None
+        )
+        if self.adapter_active:
+            if adapter_sha is None or re.fullmatch(r"[0-9a-f]{64}", adapter_sha) is None:
+                raise ValueError(
+                    "adapter_model_sha256 is required when adapter_active is true "
+                    "and must be 64 lowercase hex characters"
+                )
+        elif adapter_sha is not None:
+            raise ValueError(
+                "adapter_model_sha256 must be absent when adapter_active is false"
+            )
+        object.__setattr__(self, "base_model_revision", revision)
+        object.__setattr__(self, "adapter_model_sha256", adapter_sha)
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "base_model_revision": self.base_model_revision,
+            "adapter_active": self.adapter_active,
+            "adapter_model_sha256": self.adapter_model_sha256,
+        }
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "ModelProvenance":
+        adapter_active = payload.get("adapter_active")
+        if not isinstance(adapter_active, bool):
+            raise ValueError("adapter_active must be a boolean")
+        adapter_sha = payload.get("adapter_model_sha256")
+        if adapter_sha is not None and not isinstance(adapter_sha, str):
+            raise ValueError("adapter_model_sha256 must be a string or null")
+        return cls(
+            base_model_revision=str(payload.get("base_model_revision", "")),
+            adapter_active=adapter_active,
+            adapter_model_sha256=adapter_sha,
+        )
 
 
 @dataclass(frozen=True)
@@ -17,6 +68,7 @@ class ModelTarget:
     base_url: str
     model: str
     api_key_env: str | None
+    provenance: ModelProvenance | None = None
 
     def __post_init__(self) -> None:
         name = self.name.strip()
@@ -52,9 +104,21 @@ class ModelTarget:
         if self.api_key_env is not None:
             value = self.api_key_env.strip()
             object.__setattr__(self, "api_key_env", value or None)
+        if self.provenance is not None and not isinstance(
+            self.provenance,
+            ModelProvenance,
+        ):
+            raise ValueError("model target provenance must be ModelProvenance or None")
 
     @classmethod
     def from_record(cls, record: Mapping[str, object]) -> "ModelTarget":
+        raw_provenance = record.get("provenance")
+        if raw_provenance is None:
+            provenance = None
+        elif isinstance(raw_provenance, Mapping):
+            provenance = ModelProvenance.from_mapping(raw_provenance)
+        else:
+            raise ValueError("model target provenance must be an object or null")
         return cls(
             name=str(record["name"]),
             provider=str(record["provider"]),
@@ -65,6 +129,7 @@ class ModelTarget:
                 if record.get("api_key_env") is None
                 else str(record["api_key_env"])
             ),
+            provenance=provenance,
         )
 
 
@@ -154,11 +219,9 @@ def probe_model_target(
 
     try:
         payload = json.loads(raw.decode("utf-8"))
-        ids = [
-            str(item["id"])
-            for item in payload.get("data", [])
-            if isinstance(item, dict) and "id" in item
-        ]
+        data = payload.get("data", [])
+        records = [item for item in data if isinstance(item, dict) and "id" in item]
+        ids = [str(item["id"]) for item in records]
     except (UnicodeDecodeError, json.JSONDecodeError, AttributeError, TypeError):
         return {
             "name": target.name,
@@ -168,13 +231,43 @@ def probe_model_target(
             "model": target.model,
             "error": "models response was not valid OpenAI-compatible JSON",
         }
+
+    matching = next(
+        (item for item in records if str(item.get("id")) == target.model),
+        None,
+    )
+    raw_observed_provenance = (
+        matching.get("provenance")
+        if isinstance(matching, dict)
+        else None
+    )
+    observed_provenance: dict[str, object] | None = None
+    if isinstance(raw_observed_provenance, Mapping):
+        observed_provenance = dict(raw_observed_provenance)
+
+    expected_provenance = (
+        None if target.provenance is None else target.provenance.to_mapping()
+    )
+    provenance_verified = False
+    provenance_ready = target.provenance is None
+    if target.provenance is not None and observed_provenance is not None:
+        try:
+            observed = ModelProvenance.from_mapping(observed_provenance)
+        except ValueError:
+            observed = None
+        provenance_verified = observed == target.provenance
+        provenance_ready = provenance_verified
+
     return {
         "name": target.name,
         "reachable": True,
-        "ready": target.model in ids,
+        "ready": target.model in ids and provenance_ready,
         "http_status": status,
         "model": target.model,
         "advertised_models": ids,
+        "expected_provenance": expected_provenance,
+        "observed_provenance": observed_provenance,
+        "provenance_verified": provenance_verified,
     }
 
 
@@ -200,7 +293,7 @@ class TargetResolvingModelAdapter:
         self.api_key_env = api_key_env
         self.env = env
         self.timeout_seconds = timeout_seconds
-        self._last_binding: tuple[str, str, str] | None = None
+        self._last_binding: tuple[str, str, str, str | None] | None = None
 
     def current_target(self) -> ModelTarget:
         return resolve_model_target(
@@ -214,7 +307,15 @@ class TargetResolvingModelAdapter:
 
     def respond(self, *, messages, tools):  # type: ignore[no-untyped-def]
         target = self.current_target()
-        binding = (target.name, target.base_url, target.model)
+        provenance = (
+            None if target.provenance is None else target.provenance.to_mapping()
+        )
+        provenance_key = (
+            None
+            if provenance is None
+            else json.dumps(provenance, sort_keys=True, separators=(",", ":"))
+        )
+        binding = (target.name, target.base_url, target.model, provenance_key)
         if binding != self._last_binding:
             self.store.append_journal(
                 event_type="MODEL_TARGET_BOUND",
@@ -223,6 +324,7 @@ class TargetResolvingModelAdapter:
                     "provider": target.provider,
                     "base_url": target.base_url,
                     "model": target.model,
+                    "provenance": provenance,
                 },
                 now=__import__("time").time(),
             )

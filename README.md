@@ -149,15 +149,18 @@ Define the local model that Pre-Active should use as its cognitive target, then 
 pre-active --state .pre-active/state.db target set local-primary \
   --base-url "http://127.0.0.1:11434/v1" \
   --model "your-local-model" \
+  --base-model-revision "<40-lowercase-hex-revision>" \
   --activate
 
 pre-active --state .pre-active/state.db target probe
 pre-active --state .pre-active/state.db run-once
 ```
 
-Targets are loopback-only in V1. The target stores endpoint identity and an optional **environment-variable name** for a key; it never stores the key itself. Change models with `target activate <name>` rather than rewriting the daemon.
+Targets are loopback-only in V1. The target stores endpoint identity, optional expected model provenance, and an optional **environment-variable name** for a key; it never stores the key itself. When `--base-model-revision` is configured, `target probe` requires the endpoint's matching model record to advertise the same revision before reporting the target ready. An optional `--adapter-model-sha256 <64-lowercase-hex>` binds a loaded adapter and implies `adapter_active=true`. Change models with `target activate <name>` rather than rewriting the daemon.
 
-For backward compatibility, `PRE_ACTIVE_BASE_URL` and `PRE_ACTIVE_MODEL` are still accepted when no persisted target exists. Explicit `--base-url/--model` remains a one-run override.
+The bundled Qwen endpoint derives `base_model_revision` from the Hugging Face snapshot directory it actually loads and advertises `adapter_active=false` because that server does not load an adapter. This is host-local provenance evidence, not independent cryptographic proof that every cached model byte is untampered, and it never grants effect authority.
+
+For backward compatibility, `PRE_ACTIVE_BASE_URL` and `PRE_ACTIVE_MODEL` are still accepted when no persisted target exists. Explicit `--base-url/--model` remains a one-run override. Legacy targets without expected provenance can still be probed for model availability, but they cannot establish a provenance-verified binding.
 
 Run continuously:
 
