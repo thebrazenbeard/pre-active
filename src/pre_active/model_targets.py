@@ -85,6 +85,12 @@ class ModelTarget:
         parsed = parse.urlparse(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("model target base_url must be an http(s) URL")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("model target base_url has an invalid port") from exc
+        if port == 0:
+            raise ValueError("model target base_url port must be nonzero")
         host = parsed.hostname
         is_loopback = host == "localhost"
         if not is_loopback:
