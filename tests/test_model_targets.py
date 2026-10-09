@@ -72,6 +72,22 @@ def test_model_target_rejects_non_loopback_endpoint() -> None:
         )
 
 
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1:99999/v1",
+    "http://localhost:not-a-port/v1",
+    "http://[::1]:0/v1",
+])
+def test_model_target_rejects_invalid_loopback_ports(url: str) -> None:
+    with pytest.raises(ValueError, match="port"):
+        ModelTarget(
+            name="broken",
+            provider="openai-compatible",
+            base_url=url,
+            model="local",
+            api_key_env=None,
+        )
+
+
 def test_model_target_accepts_localhost_and_loopback() -> None:
     for url in (
         "http://127.0.0.1:11434/v1",
