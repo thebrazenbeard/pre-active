@@ -102,6 +102,14 @@ The host is bound to the base Qwen revision listed above. A separately trained V
 
 The host also requires `runtime\model-path.txt`, containing the exact local model snapshot path. Keeping the model location as host configuration avoids silently baking a machine-specific cache path into source.
 
+## Current Windows task registration
+
+`register-tasks.ps1 -Root <runtime-root>` binds the source into the pinned Python and registers and starts the daemon and watchdog tasks. The bundled Qwen endpoint is optional: ordinary registration preserves an existing `PreActive Qwen Endpoint` task without stopping, replacing, or removing it. The registration script directly registers and starts that endpoint only with `-RegisterBundledQwenHost`. Removing an existing endpoint remains a separate host operation.
+
+The watchdog task receives the same quoted `-Root` value, including roots containing spaces. When invoked directly, `watchdog.ps1 -Root <runtime-root>` takes precedence over `PRE_ACTIVE_ROOT`; without that parameter it uses the environment value, then `C:\ProgramData\PreActive`. It creates the root's log directory before recording a restart or error. It watches the daemon and any registered bundled Qwen endpoint, and leaves tasks that are already running alone.
+
+The scheduler actions run the pinned Python directly for the daemon and bundled endpoint. Registration changes host tasks, starts processes, and writes the source binding, so source preparation and mocked tests do not constitute installation or activation authority. The task-script tests intercept those host effects and the interpreter preflight while executing the actual registration/watchdog control flow.
+
 ## Rename qualification boundary
 
 This source rename does not migrate the Lappy installation, Windows scheduled tasks, environment, state database, or model process. Any claim that the host is currently running Pre-Active requires a separate installation/cutover action and fresh runtime qualification against the renamed paths and task identities.

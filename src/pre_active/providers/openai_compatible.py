@@ -8,6 +8,7 @@ import time
 from typing import Any
 from urllib import error, request
 
+from ..local_transport import is_loopback_url, open_local_request
 from ..engine import (
     ModelResponse,
     NonRetryableModelError,
@@ -147,7 +148,10 @@ class OpenAICompatibleAdapter:
             method="POST",
         )
         try:
-            with request.urlopen(req, timeout=self.timeout_seconds) as response:
+            # Runtime ModelTargets are local-only. Preserve the generic
+            # adapter's existing remote-provider behavior for direct callers.
+            open_request = open_local_request if is_loopback_url(self.base_url) else request.urlopen
+            with open_request(req, timeout=self.timeout_seconds) as response:
                 raw = response.read()
         except error.HTTPError as exc:
             raise _http_model_error(exc) from exc

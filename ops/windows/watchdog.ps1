@@ -1,7 +1,12 @@
+param(
+    [string]$Root = $(if ($env:PRE_ACTIVE_ROOT) { $env:PRE_ACTIVE_ROOT } else { "C:\ProgramData\PreActive" })
+)
+
 $ErrorActionPreference = "Stop"
 
-$root = if ($env:PRE_ACTIVE_ROOT) { $env:PRE_ACTIVE_ROOT } else { "C:\ProgramData\PreActive" }
-$log = Join-Path $root "logs\watchdog.log"
+$logDirectory = Join-Path $Root "logs"
+New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
+$log = Join-Path $logDirectory "watchdog.log"
 
 $names = @("PreActive Daemon")
 if (Get-ScheduledTask -TaskName "PreActive Qwen Endpoint" -ErrorAction SilentlyContinue) {

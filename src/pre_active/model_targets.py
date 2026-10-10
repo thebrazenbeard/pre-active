@@ -8,6 +8,7 @@ from urllib import error, parse, request
 
 from .store import Store
 from .providers.openai_compatible import OpenAICompatibleAdapter
+from .local_transport import open_local_request
 
 
 @dataclass(frozen=True)
@@ -131,7 +132,7 @@ def probe_model_target(
             headers["Authorization"] = f"Bearer {token}"
     req = request.Request(f"{target.base_url}/models", headers=headers, method="GET")
     try:
-        with request.urlopen(req, timeout=timeout_seconds) as response:
+        with open_local_request(req, timeout=timeout_seconds) as response:
             raw = response.read()
             status = int(getattr(response, "status", 200))
     except error.HTTPError as exc:
