@@ -91,6 +91,12 @@ class ModelTarget:
             raise ValueError("model target base_url has an invalid port") from exc
         if port == 0:
             raise ValueError("model target base_url port must be nonzero")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("model target base_url port is invalid") from exc
+        if port is not None and port < 1:
+            raise ValueError("model target base_url port must be positive")
         host = parsed.hostname
         is_loopback = host == "localhost"
         if not is_loopback:
