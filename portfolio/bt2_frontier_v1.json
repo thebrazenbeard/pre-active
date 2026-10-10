@@ -1,0 +1,19 @@
+{
+  "schema": "BT2_CROSS_REPO_FRONTIER_V1",
+  "repository": "thebrazenbeard/pre-active",
+  "source_baseline": {
+    "observed_sha": "0721d24493a1d282bc252b3250ea14173e013a99",
+    "source_only": true
+  },
+  "lane": "resident-autonomy",
+  "objective": "Ensure malformed or stale local model target inputs fail before dispatch or effect admission.",
+  "acceptance_invariant": "Autonomous cognition requests never widen effect authority or replay ambiguous effects.",
+  "release_gates": {
+    "source_test": "REQUIRED",
+    "exact_head_review": "REQUIRED",
+    "installed_runtime": "NOT_CLAIMED",
+    "protected_effect_authority": false
+  },
+  "kind": "ADVISORY_SOURCE_ONLY",
+  "observed_at": "2026-10-09"
+}
