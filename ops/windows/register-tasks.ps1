@@ -54,15 +54,9 @@ if ($RegisterBundledQwenHost) {
     $qwenArgs = '"' + $qwenScript + '"'
     $qwenAction = New-ScheduledTaskAction -Execute $python -Argument $qwenArgs -WorkingDirectory (Join-Path $Root "runtime")
     Register-ScheduledTask -TaskName "PreActive Qwen Endpoint" -Action $qwenAction -Trigger $boot -Principal $principal -Settings $longSettings -Force | Out-Null
-} else {
-    $existingQwen = Get-ScheduledTask -TaskName "PreActive Qwen Endpoint" -ErrorAction SilentlyContinue
-    if ($existingQwen) {
-        Stop-ScheduledTask -TaskName "PreActive Qwen Endpoint" -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName "PreActive Qwen Endpoint" -Confirm:$false
-    }
 }
 
-$watchArguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $watchScript + '"'
+$watchArguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $watchScript + '" -Root "' + $Root + '"'
 $watchAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $watchArguments
 $watchTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
 $watchSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
