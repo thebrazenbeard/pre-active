@@ -5,6 +5,16 @@ import json
 
 import pytest
 
+from meso_crct import (
+    CircuitState,
+    RewardState,
+    SalienceState,
+    TargetState,
+    derive_action_tendency,
+    propose_action_intent,
+    select_target,
+)
+
 from pre_active.cli import main
 from pre_active.context import ContextAssembler
 from pre_active.engine import Engine, ModelResponse
@@ -594,4 +604,189 @@ def test_bridge_does_not_attach_context_for_different_active_goal(
     assert "observation_context" not in event["payload"]["volition"]
     assert "Observation context (read-only):" not in event["payload"]["task"]
     assert "observer-B" not in event["payload"]["task"]
+    store.close()
+
+
+# MESO-CRCT → Volition → Pre-Active: explicit durable ingress.
+
+def _meso_intent(*, kind: str = "approach"):
+    if kind == "approach":
+        state = CircuitState(salience=SalienceState(incentive_salience=0.9))
+    elif kind == "inspect":
+        state = CircuitState(salience=SalienceState(epistemic_value=0.9))
+    elif kind == "withdraw":
+        state = CircuitState(reward=RewardState(hazard=1.0, avoidance=1.0))
+    elif kind == "hold":
+        state = CircuitState()
+    else:
+        raise AssertionError(kind)
+    selection = select_target([TargetState("meso-target", state)])
+    return propose_action_intent(derive_action_tendency(selection))
+
+
+class _MesoFinalModel:
+    def respond(self, *, messages, tools):
+        return ModelResponse(final_text="MESO_ZERO_CAPABILITIES_OK")
+
+
+def _meso_engine(store: Store) -> Engine:
+    return Engine(
+        store=store,
+        model=_MesoFinalModel(),
+        tools=ToolRegistry(store),
+        context=ContextAssembler(store),
+        system_prompt="Run.",
+        worker_id="meso-ingress-test",
+    )
+
+
+def test_real_meso_approach_survives_restart_and_produces_zero_capability_cognition(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state.db"
+    store = Store(state_path)
+    proposal = _meso_intent()
+    assert proposal.can_execute is False
+    assert proposal.effect_authorized is False
+
+    [signal_id] = VolitionBridge(store).enqueue_meso_intent(
+        proposal=proposal, source_event_id="meso-cycle-1", now=1.0
+    )
+    [signal_event] = store.list_events(kind="volition.signal")
+    assert signal_event["id"] == signal_id
+    assert signal_event["payload"]["kind"] == "open_loop"
+    assert signal_event["payload"]["provenance"] == "model_generated"
+    assert signal_event["payload"]["source"].startswith("meso-crct:intent:approach:")
+    assert signal_event["payload"]["meso_source_event_id"] == "meso-cycle-1"
+    assert signal_event["payload"]["effect_authority"] is False
+
+    store.close()
+    store = Store(state_path)
+    assert VolitionBridge(store).enqueue_meso_intent(
+        proposal=proposal, source_event_id="meso-cycle-1", now=2.0
+    ) == (signal_id,)
+    assert len(store.list_events(kind="volition.signal")) == 1
+
+    engine = _meso_engine(store)
+    assert engine.run_once(now=3.0) is None
+    [cognition] = store.list_events(kind="autonomous.turn")
+    assert cognition["payload"]["source"] == "ENDOGENOUS"
+    assert cognition["payload"]["capabilities"] == []
+    assert cognition["payload"]["volition"]["effect_authority"] is False
+    assert cognition["payload"]["volition"]["signal_provenance"] == "model_generated"
+    assert cognition["payload"]["volition"]["signal_source"].startswith("meso-crct:intent:")
+
+    run_id = engine.run_once(now=4.0)
+    assert run_id is not None
+    assert store.get_run(run_id)["capabilities"] == set()
+    assert engine.run_once(now=5.0) == run_id
+    assert store.get_run(run_id)["status"] == "COMPLETED"
+    store.close()
+
+
+def test_meso_hold_is_durable_no_signal_and_identity_cannot_change(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    store = Store(path)
+    bridge = VolitionBridge(store)
+    assert bridge.enqueue_meso_intent(
+        proposal=_meso_intent(kind="hold"), source_event_id="meso-cycle-hold", now=1.0
+    ) == ()
+    store.close()
+
+    store = Store(path)
+    bridge = VolitionBridge(store)
+    assert bridge.enqueue_meso_intent(
+        proposal=_meso_intent(kind="hold"), source_event_id="meso-cycle-hold", now=2.0
+    ) == ()
+    with pytest.raises(RuntimeError, match="already bound"):
+        bridge.enqueue_meso_intent(
+            proposal=_meso_intent(), source_event_id="meso-cycle-hold", now=3.0
+        )
+    assert store.list_events(kind="volition.signal") == []
+    assert store.get_volition_state() is None
+    store.close()
+
+
+@pytest.mark.parametrize("kind,expected", [
+    ("inspect", "epistemic"),
+    ("withdraw", "protection"),
+])
+def test_meso_other_typed_intents_enter_as_evidence_only(
+    tmp_path: Path, kind: str, expected: str
+) -> None:
+    store = Store(tmp_path / "state.db")
+    [signal_id] = VolitionBridge(store).enqueue_meso_intent(
+        proposal=_meso_intent(kind=kind), source_event_id=f"meso-{kind}", now=1.0
+    )
+    [event] = store.list_events(kind="volition.signal")
+    assert event["id"] == signal_id
+    assert event["payload"]["kind"] == expected
+    assert event["payload"]["provenance"] == "model_generated"
+    assert event["payload"]["effect_authority"] is False
+    assert "capabilities" not in event["payload"]
+    store.close()
+
+
+def test_meso_source_identity_is_mandatory_and_collision_is_rejected(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+    for bad in ("", "   ", " leading", "trailing "):
+        with pytest.raises(ValueError, match="source_event_id"):
+            bridge.enqueue_meso_intent(proposal=_meso_intent(), source_event_id=bad, now=1.0)
+    bridge.enqueue_meso_intent(
+        proposal=_meso_intent(), source_event_id="stable-meso-id", now=1.0
+    )
+    with pytest.raises(RuntimeError, match="already bound"):
+        bridge.enqueue_meso_intent(
+            proposal=_meso_intent(kind="inspect"), source_event_id="stable-meso-id", now=2.0
+        )
+    assert len(store.list_events(kind="volition.signal")) == 1
+    store.close()
+
+
+def test_reject_forged_authorized_intent_without_writes(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+    forged = _meso_intent()
+    object.__setattr__(forged, "effect_authorized", True)
+    with pytest.raises(ValueError, match="authorized"):
+        bridge.enqueue_meso_intent(
+            proposal=forged, source_event_id="tampered", now=1.0
+        )
+    with pytest.raises((TypeError, ValueError)):
+        bridge.enqueue_meso_intent(
+            proposal={
+                "target_id": "meso-target",
+                "kind": "approach",
+                "strength": 0.9,
+                "effect_authorized": False,
+                "can_execute": False,
+            },
+            source_event_id="dict-spoof",
+            now=1.0,
+        )
+    assert store.list_events(kind="volition.signal") == []
+    assert store.connection.execute("SELECT COUNT(*) FROM meso_intent_ingress").fetchone()[0] == 0
+    store.close()
+
+
+def test_meso_ingress_rolls_back_signal_on_receipt_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = Store(tmp_path / "state.db")
+
+    def fail_receipt(**kwargs):
+        raise RuntimeError("receipt unavailable")
+
+    monkeypatch.setattr(store, "record_meso_intent_ingress", fail_receipt)
+    with pytest.raises(RuntimeError, match="receipt unavailable"):
+        VolitionBridge(store).enqueue_meso_intent(
+            proposal=_meso_intent(), source_event_id="rollback-meso", now=1.0
+        )
+    assert store.list_events(kind="volition.signal") == []
+    assert store.get_meso_intent_ingress("rollback-meso") is None
     store.close()
