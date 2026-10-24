@@ -43,6 +43,109 @@ class VolitionBridge:
             now=now,
         )
 
+    def enqueue_meso_intent(
+        self,
+        *,
+        proposal: object,
+        source_event_id: str,
+        now: float,
+    ) -> tuple[str, ...]:
+        """Durably admit one authentic, non-executable MESO IntentProposal.
+
+        This is an explicit producer-side ingress, not an effect or host scheduler.
+        HOLD binds its source identity without inventing a Volition drive.
+        """
+        if (
+            not isinstance(source_event_id, str)
+            or not source_event_id
+            or source_event_id != source_event_id.strip()
+        ):
+            raise ValueError("MESO source_event_id must be non-empty stable text")
+        if self.store.connection.in_transaction:
+            raise RuntimeError("MESO ingress must own its store transaction")
+
+        try:
+            from meso_crct import IntentProposal
+            from volition import MesoIntentBridge, MesoIntentEvidence, ProvenanceClass
+        except ImportError as exc:
+            raise RuntimeError(
+                "MESO and Volition runtimes are required for MESO intent ingress"
+            ) from exc
+        if not isinstance(proposal, IntentProposal):
+            raise TypeError("MESO ingress requires a real IntentProposal")
+
+        # Revalidate even already-typed evidence: no caller may waive these gates.
+        evidence = MesoIntentEvidence.from_value(proposal)
+        signals = MesoIntentBridge.to_signals(proposal)
+        if len(signals) > 1:
+            raise RuntimeError("MESO ingress permits at most one motive signal")
+        for signal in signals:
+            if signal.provenance is not ProvenanceClass.MODEL_GENERATED:
+                raise RuntimeError("MESO motive signal provenance was elevated")
+
+        intent = {
+            "target_id": evidence.target_id,
+            "kind": evidence.kind,
+            "strength": evidence.strength,
+            "source_tendency": evidence.source_tendency,
+            "source": evidence.source,
+            "effect_authorized": False,
+            "can_execute": False,
+        }
+        self.store.connection.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.store.get_meso_intent_ingress(source_event_id)
+            if existing is not None:
+                if existing["intent"] != intent:
+                    raise RuntimeError("MESO source_event_id already bound to different intent")
+                signal_id = existing["signal_event_id"]
+                self.store.connection.execute("COMMIT")
+                return (signal_id,) if signal_id is not None else ()
+
+            signal_id: str | None = None
+            if signals:
+                signal = signals[0]
+                signal_id = self.enqueue_signal(
+                    payload={
+                        "target": signal.target,
+                        "kind": signal.kind.value,
+                        "magnitude": float(signal.magnitude),
+                        "confidence": float(signal.confidence),
+                        "provenance": signal.provenance.value,
+                        "source": signal.source,
+                        "expected_information_gain": float(signal.expected_information_gain),
+                        "learning_progress": float(signal.learning_progress),
+                        "controllability": float(signal.controllability),
+                        "predicted_deficit_reduction": float(signal.predicted_deficit_reduction),
+                        "current_reappraisal": bool(signal.current_reappraisal),
+                        "meso_source_event_id": source_event_id,
+                        "effect_authority": False,
+                    },
+                    dedup_key=f"meso-intent:{source_event_id}",
+                    now=now,
+                )
+            self.store.record_meso_intent_ingress(
+                source_event_id=source_event_id,
+                intent=intent,
+                signal_event_id=signal_id,
+                now=now,
+            )
+            self.store.append_journal(
+                event_type="MESO_INTENT_INGRESSED",
+                subject_id=source_event_id,
+                payload={
+                    "intent_kind": evidence.kind,
+                    "signal_event_id": signal_id,
+                    "effect_authority": False,
+                },
+                now=now,
+            )
+            self.store.connection.execute("COMMIT")
+            return (signal_id,) if signal_id is not None else ()
+        except BaseException:
+            self.store.connection.execute("ROLLBACK")
+            raise
+
     @staticmethod
     def _text(payload: dict[str, Any], key: str) -> str:
         value = payload.get(key)

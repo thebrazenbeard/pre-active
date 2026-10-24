@@ -222,6 +222,44 @@ Signal processing is receipt-bound and crash-consistent with the resulting Volit
 state revision and cognition event. Re-delivery of the same source event does not
 amplify into another turn.
 
+### MESO intent ingress (explicit producer API)
+
+This optional adapter connects a real `meso_crct.IntentProposal` through
+Volition's `MesoIntentBridge` to Pre-Active's durable `volition.signal`
+queue. It is **not** a background MESO producer or a deployed host service.
+
+```bash
+python -m pip install -e '.[meso]'
+```
+
+```python
+from pre_active.store import Store
+from pre_active.volition_bridge import VolitionBridge
+
+store = Store(".pre-active/state.db")
+# proposal: real meso_crct.IntentProposal from propose_action_intent()
+event_ids = VolitionBridge(store).enqueue_meso_intent(
+    proposal=proposal,
+    source_event_id="meso-observation-or-cycle-id-123",
+    now=event_timestamp,
+)
+```
+
+The calling MESO producer must provide a **stable, unique source event ID**.
+The bridge only accepts a real non-executable MESO proposal; a forged
+authorization/executable claim fails closed. It persists a receipt that binds
+that ID to the validated intent and its optional enqueued Volition signal.
+Retries with the same intent return the same event ID; changing the intent
+for an existing source ID is rejected. `HOLD` is durably receipted but
+produces no motive signal. Admission, signal enqueue, receipt, and journal
+commit atomically in SQLite.
+
+One proposal creates **at most one** `model_generated` Volition signal.
+Downstream cognition retains `source=ENDOGENOUS`,
+`effect_authority=false`, and `capabilities=[]`. The producer must
+explicitly call this API; no automatic MESO polling, model installation,
+host startup, or verified external effect is implied by the repository tests.
+
 ### Observer dispatch routes
 
 Observers keep their existing direct `autonomous_turn` route by default. An

@@ -126,6 +126,12 @@ CREATE TABLE IF NOT EXISTS volition_state (
     revision INTEGER NOT NULL CHECK (revision >= 1),
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS meso_intent_ingress (
+    source_event_id TEXT PRIMARY KEY,
+    intent_json TEXT NOT NULL,
+    signal_event_id TEXT REFERENCES events(id),
+    created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS volition_signal_receipts (
     source_event_id TEXT PRIMARY KEY,
     state_revision INTEGER NOT NULL CHECK (state_revision >= 1),
@@ -1348,6 +1354,45 @@ class Store:
             if owns_transaction and self.connection.in_transaction:
                 self.connection.execute("ROLLBACK")
             raise
+
+    def get_meso_intent_ingress(self, source_event_id: str) -> dict[str, Any] | None:
+        """Return the durable source-identity binding, including a HOLD receipt."""
+        row = self.connection.execute(
+            "SELECT source_event_id, intent_json, signal_event_id, created_at "
+            "FROM meso_intent_ingress WHERE source_event_id=?",
+            (source_event_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "source_event_id": str(row["source_event_id"]),
+            "intent": json.loads(row["intent_json"]),
+            "signal_event_id": row["signal_event_id"],
+            "created_at": float(row["created_at"]),
+        }
+
+    def record_meso_intent_ingress(
+        self,
+        *,
+        source_event_id: str,
+        intent: dict[str, Any],
+        signal_event_id: str | None,
+        now: float,
+    ) -> None:
+        """Insert inside the caller's fenced enqueue transaction."""
+        if not self.connection.in_transaction:
+            raise RuntimeError("MESO ingress receipt requires active transaction")
+        self.connection.execute(
+            "INSERT INTO meso_intent_ingress "
+            "(source_event_id, intent_json, signal_event_id, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                source_event_id,
+                json.dumps(intent, sort_keys=True, separators=(",", ":")),
+                signal_event_id,
+                now,
+            ),
+        )
 
     def get_volition_signal_receipt(
         self, source_event_id: str
