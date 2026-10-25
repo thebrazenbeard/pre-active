@@ -17,11 +17,11 @@ volition = [
 ]
 meso = [
     "volition @ git+https://github.com/thebrazenbeard/volition.git@e728c04ce2405854f8a2f9e62c819a32670e89ef",
-    "meso-crct @ git+https://github.com/thebrazenbeard/meso-crct.git@ea309b932b64d804d5e1472b18a0b48a5ff9fd8f",
+    "meso-crct @ git+https://github.com/thebrazenbeard/meso-crct.git@4ed527d31a68fc215158a520f1cd404e8f16b35b",
 ]
 dev = [
     "pytest>=8,<10",
-    "meso-crct @ git+https://github.com/thebrazenbeard/meso-crct.git@ea309b932b64d804d5e1472b18a0b48a5ff9fd8f",
+    "meso-crct @ git+https://github.com/thebrazenbeard/meso-crct.git@4ed527d31a68fc215158a520f1cd404e8f16b35b",
     "volition @ git+https://github.com/thebrazenbeard/volition.git@e728c04ce2405854f8a2f9e62c819a32670e89ef",
 ]
 
