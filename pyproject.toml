@@ -13,16 +13,16 @@ readme = "README.md"
 
 [project.optional-dependencies]
 volition = [
-    "volition @ git+https://github.com/thebrazenbeard/volition.git@d43c16c15577157335a9251ba43e45dd96dfcdf4",
+    "volition @ git+https://github.com/thebrazenbeard/volition.git@e728c04ce2405854f8a2f9e62c819a32670e89ef",
 ]
 meso = [
-    "volition @ git+https://github.com/thebrazenbeard/volition.git@d43c16c15577157335a9251ba43e45dd96dfcdf4",
+    "volition @ git+https://github.com/thebrazenbeard/volition.git@e728c04ce2405854f8a2f9e62c819a32670e89ef",
     "meso-crct @ git+https://github.com/thebrazenbeard/meso-crct.git@ea309b932b64d804d5e1472b18a0b48a5ff9fd8f",
 ]
 dev = [
     "pytest>=8,<10",
     "meso-crct @ git+https://github.com/thebrazenbeard/meso-crct.git@ea309b932b64d804d5e1472b18a0b48a5ff9fd8f",
-    "volition @ git+https://github.com/thebrazenbeard/volition.git@d43c16c15577157335a9251ba43e45dd96dfcdf4",
+    "volition @ git+https://github.com/thebrazenbeard/volition.git@e728c04ce2405854f8a2f9e62c819a32670e89ef",
 ]
 
 [project.scripts]
