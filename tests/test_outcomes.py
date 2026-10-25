@@ -258,8 +258,13 @@ class OutcomeLedgerTests(unittest.TestCase):
             {"evidence_ref": " "},
             {"evidence_sha256": "z" * 64},
             {"claimed_need_change": float("nan")},
+            {"claimed_need_change": 10**1000},
+            {"claimed_need_change": -(10**1000)},
             {"claimed_need_change": 2.0},
             {"observed_at": float("inf")},
+            {"observed_at": 10**1000},
+            {"observed_at": -(10**1000)},
+            {"expires_at": 10**1000},
             {"expires_at": 11.0},
             {"claimed_outcome": ClaimedOutcome.NO_EFFECT, "claimed_need_change": 0.5},
             {"claimed_outcome": ClaimedOutcome.FAILURE, "claimed_need_change": 0.3},
@@ -273,6 +278,14 @@ class OutcomeLedgerTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 self.candidate(**fields)
         self.assertEqual(self.ledger.count(), 0)
+
+    def test_unbounded_operation_timestamp_rejected_without_state_write(self) -> None:
+        with self.assertRaises(ValueError):
+            self.ledger.record(self.candidate(), now=10**1000)
+        with self.assertRaises(ValueError):
+            self.ledger.reject_expired(now=10**1000)
+        self.assertEqual(self.ledger.count(), 0)
+        self.assertEqual(self.store.list_journal(subject_id="observation-1"), [])
 
 
 if __name__ == "__main__":

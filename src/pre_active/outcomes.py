@@ -80,15 +80,17 @@ def _text(value: str, *, name: str, maximum: int = 2048) -> None:
 
 
 def _time(value: float, *, name: str) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-    ):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a finite timestamp")  # noqa: TRY004 - stable validation API
+    try:
+        normalized = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be a finite timestamp") from exc
+    if not math.isfinite(normalized):
         raise ValueError(f"{name} must be a finite timestamp")
-    if value < 0:
+    if normalized < 0:
         raise ValueError(f"{name} must not be negative")
-    return float(value)
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,12 +142,15 @@ class OutcomeCandidate:
             raise ValueError("evidence_sha256 must be lowercase SHA-256 hex")
 
         delta = self.claimed_need_change
-        if (
-            isinstance(delta, bool)
-            or not isinstance(delta, (int, float))
-            or not math.isfinite(delta)
-            or not -1.0 <= delta <= 1.0
-        ):
+        if isinstance(delta, bool) or not isinstance(delta, (int, float)):
+            raise ValueError("claimed_need_change must be a finite normalized delta")  # noqa: TRY004 - stable validation API
+        try:
+            delta = float(delta)
+        except OverflowError as exc:
+            raise ValueError(
+                "claimed_need_change must be a finite normalized delta"
+            ) from exc
+        if not math.isfinite(delta) or not -1.0 <= delta <= 1.0:
             raise ValueError("claimed_need_change must be a finite normalized delta")
         if self.claimed_outcome is ClaimedOutcome.NO_EFFECT and delta != 0:
             raise ValueError("NO_EFFECT cannot claim a need change")
