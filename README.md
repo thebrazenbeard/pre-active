@@ -237,7 +237,7 @@ pre-active --state .pre-active/state.db volition-signal investigate-ci \
 ```
 
 Pre-Active does not infer wants from arbitrary event text. The bridge accepts an
-explicit Volition `Signal`, durably restores/updates `VOLITION_STATE_V2`, and
+explicit Volition `Signal`, durably restores/updates `VOLITION_STATE_V3`, and
 emits at most one `ENDOGENOUS` cognition event for that signal. The generated
 turn always starts with an empty capability set; urgency and motive score do not
 grant tools or effect authority.
@@ -265,6 +265,20 @@ source policy prevents a finite but implausibly far-future persisted anchor
 from indefinitely pinning Volition time; it does not repair that row or
 silently reset its clock. Operators must reconcile larger clock discrepancies
 under separate authority.
+
+**Volition V3 migration boundary.** The optional `volition`, `meso`, and `dev`
+extras pin `thebrazenbeard/volition@e728c04ce2405854f8a2f9e62c819a32670e89ef`
+(the same verified source tree in every extra). A persisted V2 snapshot with
+no active goal or an unrevised revision-1 goal remains readable; the next
+successfully admitted signal writes a V3 snapshot under the ordinary durable
+revision transaction. **A V2 snapshot with an active goal at revision 2 or
+higher fails closed:** its legacy `GOAL_REAPPRAISED` history lacks score
+receipts needed to verify the revised `adoption_score`. The bridge must not
+guess the score, invent reappraisal evidence, or overwrite that row. The
+original row remains for separately authorized recovery and fresh
+reappraisal. See Volition's `docs/REAPPRAISAL_SCORE_V3.md` for the source
+contract. The V3 scored receipt is internally consistent, not an externally
+authenticated appraisal or evidence of host installation.
 
 ### MESO intent ingress (explicit producer API)
 

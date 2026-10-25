@@ -21,7 +21,7 @@ from pre_active.engine import Engine, ModelResponse
 from pre_active.store import Store
 from pre_active.tools import ToolRegistry
 from pre_active.volition_bridge import InvalidVolitionSignal, VolitionBridge
-from volition import Policy, VolitionEngine
+from volition import DriveKind, Policy, Signal, VolitionEngine
 
 
 def test_volition_state_round_trip_uses_revision_cas(tmp_path: Path) -> None:
@@ -222,6 +222,107 @@ def _open_loop_payload(target: str = "investigate") -> dict[str, object]:
         "source": "observer:file",
         "effect_authority": False,
     }
+
+
+def _reappraised_snapshot(*, legacy_v2: bool) -> dict[str, object]:
+    engine = VolitionEngine(Policy(goal_reappraisal_seconds=1.0))
+    engine.tick([
+        Signal(target="migration-rest", kind=DriveKind.OPEN_LOOP, magnitude=0.7)
+    ])
+    engine.advance(2.0)
+    engine.tick([
+        Signal(target="migration-rest", kind=DriveKind.OPEN_LOOP, magnitude=0.8)
+    ])
+    snapshot = engine.snapshot()
+    assert snapshot["active_goal"]["revision"] == 2
+    if legacy_v2:
+        snapshot["schema"] = "VOLITION_STATE_V2"
+        for event in snapshot["events"]:
+            if event["kind"] == "GOAL_REAPPRAISED":
+                event["details"] = [
+                    (key, value) for key, value in event["details"]
+                    if key != "score"
+                ]
+    return snapshot
+
+
+def test_v3_reappraised_goal_roundtrip_through_durable_signal_bridge(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    store.save_volition_state(
+        _reappraised_snapshot(legacy_v2=False), expected_revision=0, now=2.0
+    )
+    receipt = _apply_signal(
+        store, VolitionBridge(store), source_event_id="v3-resume",
+        payload=_open_loop_payload("migration-rest"), now=3.0,
+    )
+    assert receipt["state_revision"] == 2
+    state = store.get_volition_state()
+    assert state["snapshot"]["schema"] == "VOLITION_STATE_V3"
+    restored = VolitionEngine.from_snapshot(state["snapshot"])
+    assert restored.active_goal.revision == 3
+    assert [
+        detail for event in restored.events if event.kind == "GOAL_REAPPRAISED"
+        for detail in event.details if detail[0] == "score"
+    ]
+    store.close()
+
+
+def test_legacy_v2_unrevised_goal_migrates_only_after_valid_signal(tmp_path: Path) -> None:
+    engine = VolitionEngine()
+    engine.tick([
+        Signal(target="migration-rest", kind=DriveKind.OPEN_LOOP, magnitude=0.7)
+    ])
+    snapshot = engine.snapshot()
+    snapshot["schema"] = "VOLITION_STATE_V2"
+    store = Store(tmp_path / "state.db")
+    store.save_volition_state(snapshot, expected_revision=0, now=1.0)
+    receipt = _apply_signal(
+        store, VolitionBridge(store), source_event_id="v2-rev1-resume",
+        payload=_open_loop_payload("migration-rest"), now=2.0,
+    )
+    assert receipt["state_revision"] == 2
+    assert store.get_volition_state()["snapshot"]["schema"] == "VOLITION_STATE_V3"
+    store.close()
+
+
+def test_legacy_v2_inactive_state_migrates_on_next_signal(tmp_path: Path) -> None:
+    snapshot = VolitionEngine().snapshot()
+    snapshot["schema"] = "VOLITION_STATE_V2"
+    assert snapshot["active_goal"] is None
+    store = Store(tmp_path / "state.db")
+    store.save_volition_state(snapshot, expected_revision=0, now=1.0)
+    receipt = _apply_signal(
+        store, VolitionBridge(store), source_event_id="v2-inactive-resume",
+        payload=_open_loop_payload("migration-rest"), now=2.0,
+    )
+    assert receipt["state_revision"] == 2
+    current = store.get_volition_state()["snapshot"]
+    assert current["schema"] == "VOLITION_STATE_V3"
+    assert VolitionEngine.from_snapshot(current).active_goal is not None
+    store.close()
+
+
+def test_legacy_v2_revised_goal_fails_without_overwriting_durable_state(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    store.save_volition_state(
+        _reappraised_snapshot(legacy_v2=True), expected_revision=0, now=2.0
+    )
+    row_before = store.connection.execute(
+        "SELECT revision, snapshot_json, updated_at FROM volition_state WHERE id=1"
+    ).fetchone()
+    with pytest.raises(ValueError, match="legacy V2 reappraisal score is unverifiable"):
+        _apply_signal(
+            store, VolitionBridge(store), source_event_id="legacy-unverified",
+            payload=_open_loop_payload("migration-rest"), now=3.0,
+        )
+    row_after = store.connection.execute(
+        "SELECT revision, snapshot_json, updated_at FROM volition_state WHERE id=1"
+    ).fetchone()
+    assert tuple(row_before) == tuple(row_after)
+    assert store.get_volition_signal_receipt("legacy-unverified") is None
+    assert store.list_events(kind="autonomous.turn") == []
+    assert store.list_journal() == []
+    store.close()
 
 
 def test_bridge_enqueues_zero_capability_endogenous_turn_with_provenance(
