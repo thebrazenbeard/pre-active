@@ -1,5 +1,5 @@
 SOURCE-AVAILABLE PROPRIETARY LICENSE
-Version 1.0 — 2026-09-23
+Version 1.1 — 2026-10-25 (prospective)
 
 Copyright (c) 2026 Patrick Sims. All rights reserved.
 
@@ -19,7 +19,7 @@ Except for rights that GitHub’s Terms of Service independently require for ope
 You may not use the Licensed Material as training data, fine-tuning data, evaluation data intended to improve a commercial model or service, or as part of a commercially exploited code or content dataset without prior written permission.
 
 6. CONTRIBUTIONS
-Contributions are accepted only under the repository’s CONTRIBUTING.md and CLA.md terms. Submission of a contribution does not change the license of the repository except as expressly agreed by the copyright holder.
+The copyright holder may incorporate material it owns without a separate contributor agreement. Material owned by other contributors may be incorporated only with sufficient independently documented rights, including an expressly accepted CLA.md agreement or a separate license or permission. A pull-request submission or merger alone is not acceptance of the CLA. See CONTRIBUTING.md for provenance requirements. This change is prospective and does not revoke earlier valid grants or change the license of the repository except as expressly agreed by the copyright holder.
 
 7. THIRD-PARTY MATERIAL
 Third-party software, content, dependencies, generated artifacts, or incorporated material remain governed by their respective licenses and notices. If this license conflicts with a valid third-party license for particular material, that third-party license controls for that material only.
