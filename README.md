@@ -280,6 +280,16 @@ reappraisal. See Volition's `docs/REAPPRAISAL_SCORE_V3.md` for the source
 contract. The V3 scored receipt is internally consistent, not an externally
 authenticated appraisal or evidence of host installation.
 
+**MESO observation dependency boundary.** The optional `meso` and `dev`
+extras pin `thebrazenbeard/meso-crct@4ed527d31a68fc215158a520f1cd404e8f16b35b`,
+which exposes the caller-admitted `NeedObservationLedger` and required
+`AdmissionClock` (UTC future ceiling, bounded skew). The corresponding test
+probes the imported immutable, no-effect update API. **Pinning this source does
+not wire Pre-Active outcome candidates to MESO need observations**, create a
+trusted observation source, persist an authenticated need ledger, authorize a
+Volition satisfaction update, or complete the feedback loop. The current
+outcome ledger remains an inert candidate store.
+
 ### MESO intent ingress (explicit producer API)
 
 This optional adapter connects a real `meso_crct.IntentProposal` through
