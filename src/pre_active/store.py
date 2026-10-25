@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 import sqlite3
 import uuid
@@ -1313,10 +1314,19 @@ class Store:
         snapshot = json.loads(str(row["snapshot_json"]))
         if not isinstance(snapshot, dict):
             raise RuntimeError("stored volition snapshot must be an object")
+        raw_updated_at = row["updated_at"]
+        if (
+            isinstance(raw_updated_at, bool)
+            or not isinstance(raw_updated_at, (int, float))
+            or not math.isfinite(float(raw_updated_at))
+        ):
+            # The row may predate ingress validation. Preserve it for explicit
+            # diagnosis/recovery; never silently normalize durable evidence.
+            raise RuntimeError("stored Volition updated_at is not finite")
         return {
             "revision": int(row["revision"]),
             "snapshot": snapshot,
-            "updated_at": float(row["updated_at"]),
+            "updated_at": float(raw_updated_at),
         }
 
     def save_volition_state(
@@ -1326,6 +1336,14 @@ class Store:
         expected_revision: int,
         now: float,
     ) -> int:
+        if isinstance(now, bool) or not isinstance(now, (int, float)):
+            raise ValueError("Volition state now must be a finite timestamp")
+        try:
+            now = float(now)
+        except OverflowError as exc:
+            raise ValueError("Volition state now must be a finite timestamp") from exc
+        if not math.isfinite(now):
+            raise ValueError("Volition state now must be a finite timestamp")
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
             raise ValueError("expected_revision must be an integer")
         if expected_revision < 0:

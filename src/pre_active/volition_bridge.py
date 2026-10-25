@@ -11,6 +11,11 @@ class InvalidVolitionSignal(ValueError):
     """Explicit input-contract violation for a volition.signal event."""
 
 
+# Small wall-clock corrections and modest event reordering are tolerated, but
+# a far-future durable anchor must not indefinitely freeze Volition time.
+MAX_VOLITION_CLOCK_BACKSTEP_SECONDS = 300.0
+
+
 def _finite_timestamp(now: float) -> float:
     """Reject clocks SQLite cannot durably schedule or replay predictably."""
     if isinstance(now, bool) or not isinstance(now, (int, float)):
@@ -360,9 +365,15 @@ class VolitionBridge:
             expected_revision = 0
             state_now = now
         else:
+            previous_updated_at = float(state["updated_at"])
+            if previous_updated_at > now and (
+                previous_updated_at - now > MAX_VOLITION_CLOCK_BACKSTEP_SECONDS
+            ):
+                raise RuntimeError(
+                    "stored Volition updated_at exceeds admitted clock rollback bound"
+                )
             engine = VolitionEngine.from_snapshot(state["snapshot"])
             expected_revision = int(state["revision"])
-            previous_updated_at = float(state["updated_at"])
             state_now = max(previous_updated_at, now)
             engine.advance(state_now - previous_updated_at)
 
