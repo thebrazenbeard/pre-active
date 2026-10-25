@@ -135,6 +135,51 @@ clock authority, and the stored digest is not a signature or authenticity proof.
 Do not mistake this persistence feature for
 a closed motivational feedback loop or an installed runtime integration.
 
+### Read-only MESO / Volition / outcome claim correlation
+
+`pre_active.outcome_correlation.correlate_outcome_candidate(...)` is an
+**inert source-level diagnostic** for the coordination event
+`bt2_coordination_ai_psychology`. Given a caller-supplied MESO source event ID
+and recorded outcome candidate ID, it checks that the durable MESO ingress
+references an existing non-executable `volition.signal`, that the signal's
+recorded MESO source/target/provenance match, that the processed Volition
+receipt contains a concrete goal/choice with the same target, and that the
+candidate's claimed goal and timestamps are consistent. It fails closed for
+missing/HOLD ingress, mismatched identifiers, unprocessed signals, rejected or
+expired candidates, and impossible temporal ordering. It does not enqueue,
+change, verify, reject, or otherwise mutate anything.
+
+The frozen `OutcomeCorrelation` result exposes the persisted IDs (MESO source,
+signal event, Volition goal and choice, outcome candidate), plus clearly marked
+**claimant-supplied** need, action request, source and evidence values. Its
+`evidence_admitted`, `candidate_choice_link_verified`, `need_lineage_verified`,
+`tool_effect_verified`, and `effect_authority` indicators are read-only
+computed properties, always `False`: neither constructing the dataclass nor
+`dataclasses.replace` can set them to `True`. The result also has
+`historical_only=True`, since this query does not attest the **current** goal
+instance or its choice revision. These Python properties prevent accidental
+truthy flags but cannot authenticate a caller or serve as a security boundary.
+MESO's current `IntentProposal` has no immutable `need_id`, observation
+ID, or need-state revision. The V1 outcome claim contains no choice ID or
+MESO source event ID. Consequently the exact database join does **not**
+establish that a candidate was caused by that MESO intent or Volition choice;
+the caller chose which source to associate. Two historically recorded MESO
+sources with the same Volition goal but **different choices** can both correlate
+to one claimed outcome; a source-to-choice-to-effect link is therefore not
+unique even when all identifier and timestamp checks pass. A matching goal ID, plausible
+timestamp, `SUCCESS`, SHA-256 digest, and alleged tool request are **not**
+observer authentication, independently admitted evidence, real-world effect
+proof, satisfaction, or permission to invoke Volition `complete_goal`. A
+future producer-bound V2 claim contract and separate authorized external
+adjudication boundary would be needed for those properties.
+
+The existing tool-effect ledger is not that adjudicator: `COMMITTED` records a
+tool handler result or caller-reconciled outcome, not independent environmental
+proof. The candidate's optional `action_request_id` is not joined to a tool
+receipt by this diagnostic, and even a matching request would not prove the
+claimed need change. This source does not call Volition V4's caller-admitted
+`complete_goal` route; a structurally matching caller claim is not a verifier.
+
 ## Portfolio-derived design
 
 Before implementation, the then-accessible `thebrazenbeard` portfolio was swept at repository level: **70 repositories** were inventoried and their README surfaces inspected at that historical cut. The live portfolio has since grown; the 70-repository figure is provenance for the V1 donor sweep, not a current census. High-value public donors were then inspected more deeply. Pre-Active is self-contained; donor repositories are architecture/provenance inputs, not runtime dependencies.
