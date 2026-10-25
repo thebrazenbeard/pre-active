@@ -1,8 +1,14 @@
 # Contribution License Agreement (CLA)
 
-Version 1.0 — 2026-09-23
+Version 1.1 — 2026-10-25 (prospective)
 
-This agreement applies to each contribution for which the contributor expressly states in the pull-request description: “I have read and agree to the repository CLA.”
+This agreement applies only to contributions whose contributors separately and
+affirmatively accept these terms in a documented record. No particular statement
+in a pull-request description is required. Submission, review, or merger of a
+pull request alone does not establish acceptance of this agreement. A contributor
+may instead provide sufficient rights through a separately documented license or
+permission. This change does not revoke grants validly made under earlier
+versions of this agreement.
 
 ## 1. Ownership
 You retain copyright ownership of your contribution. You represent that you are legally entitled to submit it and to grant the rights below. If your employer or another party has rights in the contribution, you represent that you have obtained the necessary authorization.
