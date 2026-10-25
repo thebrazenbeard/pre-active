@@ -11,6 +11,19 @@ class InvalidVolitionSignal(ValueError):
     """Explicit input-contract violation for a volition.signal event."""
 
 
+def _finite_timestamp(now: float) -> float:
+    """Reject clocks SQLite cannot durably schedule or replay predictably."""
+    if isinstance(now, bool) or not isinstance(now, (int, float)):
+        raise ValueError("now must be a finite timestamp")
+    try:
+        timestamp = float(now)
+    except OverflowError as exc:
+        raise ValueError("now must be a finite timestamp") from exc
+    if not math.isfinite(timestamp):
+        raise ValueError("now must be a finite timestamp")
+    return timestamp
+
+
 def _load_volition() -> tuple[Any, Any, Any, Any]:
     try:
         from volition import DriveKind, ProvenanceClass, Signal, VolitionEngine
@@ -32,6 +45,7 @@ class VolitionBridge:
         now: float,
         dedup_key: str | None = None,
     ) -> str:
+        now = _finite_timestamp(now)
         self.parse_signal_payload(payload)
         normalized = dict(payload)
         normalized["effect_authority"] = False
@@ -55,6 +69,7 @@ class VolitionBridge:
         This is an explicit producer-side ingress, not an effect or host scheduler.
         HOLD binds its source identity without inventing a Volition drive.
         """
+        now = _finite_timestamp(now)
         if (
             not isinstance(source_event_id, str)
             or not source_event_id
@@ -324,6 +339,7 @@ class VolitionBridge:
         payload: dict[str, Any],
         now: float,
     ) -> dict[str, Any]:
+        now = _finite_timestamp(now)
         if not source_event_id:
             raise ValueError("source_event_id is required")
         if not self.store.connection.in_transaction:
