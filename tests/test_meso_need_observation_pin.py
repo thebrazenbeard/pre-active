@@ -18,9 +18,11 @@ from meso_crct import (
     SourceKind,
     admit_need_observation,
 )
+from volition import DriveKind, Signal, VolitionEngine
 
 
-MESO_SOURCE = "meso-crct @ git+https://github.com/thebrazenbeard/meso-crct.git@4ed527d31a68fc215158a520f1cd404e8f16b35b"
+MESO_SOURCE = "meso-crct @ git+https://github.com/thebrazenbeard/meso-crct.git@e35e39fc2e3608265871b3197ea6098a0f13299b"
+VOLITION_SOURCE = "volition @ git+https://github.com/thebrazenbeard/volition.git@534907c3d88a941a194e1888abc1c11402a3df22"
 
 
 def test_meso_and_dev_extras_bind_the_reviewed_observation_source() -> None:
@@ -28,6 +30,28 @@ def test_meso_and_dev_extras_bind_the_reviewed_observation_source() -> None:
     extras = config["project"]["optional-dependencies"]
     assert [entry for entry in extras["meso"] if entry.startswith("meso-crct @ ")] == [MESO_SOURCE]
     assert [entry for entry in extras["dev"] if entry.startswith("meso-crct @ ")] == [MESO_SOURCE]
+
+
+def test_all_affect_extras_bind_the_same_reviewed_volition_source() -> None:
+    config = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    extras = config["project"]["optional-dependencies"]
+    for extra in ("volition", "meso", "dev"):
+        assert [entry for entry in extras[extra] if entry.startswith("volition @ ")] == [VOLITION_SOURCE]
+
+
+def test_updated_volition_scalar_feedback_cannot_complete_an_active_goal() -> None:
+    engine = VolitionEngine()
+    active = engine.tick([Signal(target="rest", kind=DriveKind.OPEN_LOOP, magnitude=0.9)])
+    assert active is not None
+    engine.record_satisfaction("rest", 1.0)
+    assert engine.active_goal == active
+    assert not any(event.kind == "GOAL_COMPLETED" for event in engine.events)
+
+
+@pytest.mark.parametrize("value", [True, "0.5", float("inf"), float("nan")])
+def test_updated_meso_need_state_rejects_untyped_or_nonfinite_measurements(value: object) -> None:
+    with pytest.raises(ValueError, match="finite numeric"):
+        NeedAxis("rest", setpoint=value, current_level=0.2)
 
 
 def test_optional_meso_need_observation_admission_is_clock_bounded_and_inert() -> None:
