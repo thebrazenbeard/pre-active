@@ -748,6 +748,55 @@ def test_meso_source_identity_is_mandatory_and_collision_is_rejected(
     store.close()
 
 
+@pytest.mark.parametrize("bad_now", [float("inf"), float("-inf"), float("nan"), True, "bad-clock"])
+@pytest.mark.parametrize("kind", ["approach", "hold"])
+def test_meso_ingress_rejects_invalid_clock_without_durable_writes(
+    tmp_path: Path, bad_now: object, kind: str
+) -> None:
+    store = Store(tmp_path / "state.db")
+    with pytest.raises(ValueError, match="now must be a finite timestamp"):
+        VolitionBridge(store).enqueue_meso_intent(
+            proposal=_meso_intent(kind=kind),
+            source_event_id="meso-invalid-clock",
+            now=bad_now,
+        )
+    assert store.get_meso_intent_ingress("meso-invalid-clock") is None
+    assert store.list_events(kind="volition.signal") == []
+    store.close()
+
+
+@pytest.mark.parametrize("bad_now", [float("inf"), float("nan"), True])
+def test_direct_volition_signal_rejects_invalid_clock_before_enqueue(
+    tmp_path: Path, bad_now: object
+) -> None:
+    store = Store(tmp_path / "state.db")
+    with pytest.raises(ValueError, match="now must be a finite timestamp"):
+        VolitionBridge(store).enqueue_signal(
+            payload=_open_loop_payload(), now=bad_now,
+        )
+    assert store.list_events(kind="volition.signal") == []
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "bad_now", [float("inf"), float("-inf"), float("nan"), True, "bad-clock"]
+)
+def test_direct_volition_signal_processing_rejects_invalid_clock_before_state_writes(
+    tmp_path: Path, bad_now: object
+) -> None:
+    store = Store(tmp_path / "state.db")
+    with pytest.raises(ValueError, match="now must be a finite timestamp"):
+        _apply_signal(
+            store, VolitionBridge(store), source_event_id="direct-invalid-clock",
+            payload=_open_loop_payload(), now=bad_now,
+        )
+    assert store.get_volition_state() is None
+    assert store.get_volition_signal_receipt("direct-invalid-clock") is None
+    assert store.list_events(kind="autonomous.turn") == []
+    assert store.list_journal() == []
+    store.close()
+
+
 def test_reject_forged_authorized_intent_without_writes(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     bridge = VolitionBridge(store)

@@ -246,6 +246,10 @@ event_ids = VolitionBridge(store).enqueue_meso_intent(
 ```
 
 The calling MESO producer must provide a **stable, unique source event ID**.
+Both the MESO ingress and the direct Volition signal API require a finite
+numeric `now` timestamp (not a Boolean). An invalid clock is rejected before
+any queue, receipt, or journal write; SQLite cannot reliably schedule a signal
+whose due time is `NaN` or infinite.
 The bridge only accepts a real non-executable MESO proposal; a forged
 authorization/executable claim fails closed. It persists a receipt that binds
 that ID to the validated intent and its optional enqueued Volition signal.
