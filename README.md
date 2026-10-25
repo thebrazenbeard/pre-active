@@ -374,11 +374,18 @@ observer change -> initiative emit
                 -> volition_signal
 ```
 
-Observation digest, summary, evidence, change count, and initiative evidence are
-carried in a separate read-only `observation_context` envelope. That envelope is
-not part of Volition motive scoring and cannot grant capabilities, queue priority,
-or effect authority. The observer's positional task is retained for compatibility
-but is ignored by the `volition_signal` route.
+An isolated, bounded, read-only `observation_context` envelope carries the
+observer's opaque ID, kind, observation digest, change count, file existence,
+size/timestamp/content digest when available, and known initiative metrics. The
+Volition bridge deliberately **does not propagate raw file paths, user-chosen
+observer names, or free-form observer summaries** into its durable signal or
+derived model turn. Unknown evidence keys, malformed data, or oversized context
+are rejected before signal enqueue; existing observer-local records still retain
+their original sampled data. This envelope is not part of Volition motive scoring
+and cannot grant capabilities, queue priority, or effect authority. The observer's
+positional task is retained for compatibility but ignored by `volition_signal`.
+The legacy direct `autonomous_turn` observer route is separate and is not made
+private by these Volition-envelope limits.
 
 ### Observer initiative policies
 
