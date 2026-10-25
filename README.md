@@ -170,8 +170,28 @@ unique even when all identifier and timestamp checks pass. A matching goal ID, p
 timestamp, `SUCCESS`, SHA-256 digest, and alleged tool request are **not**
 observer authentication, independently admitted evidence, real-world effect
 proof, satisfaction, or permission to invoke Volition `complete_goal`. A
-future producer-bound V2 claim contract and separate authorized external
-adjudication boundary would be needed for those properties.
+producer-bound V2 claim contract and separate authorized external
+adjudication boundary are still needed for those properties.
+
+#### Source-only V2 outcome-lineage claims (opt-in, non-authoritative)
+
+`pre_active.outcome_lineage_v2.correlate_outcome_lineage_v2(...)` now accepts
+**caller-supplied** immutable claims for the exact historical V1 candidate,
+MESO source, Volition signal/choice/goal and claimed goal revision, need and
+claimed need-observation revision, action request, attempt, and physical-effect
+identifier/digest. It demands exactly one supplied V1 correlation; mismatched,
+missing, ambiguous, or malformed claims fail closed. With a **bounded,
+caller-supplied** prior snapshot, candidate, attempt, and effect identifier
+reuse is rejected. The helper reads no live state, performs no database writes,
+does not change V1 claim format, and is not invoked automatically.
+
+An envelope is a historical *consistency check*, not a proven outcome:
+current goal/need revisions, producer authenticity, completeness of the
+prior snapshot, independent effect receipt, and evidence integrity are
+**not verified**. Its `evidence_admitted`, `need_lineage_verified`,
+`choice_link_verified`, `physical_effect_verified`, and `effect_authority`
+properties are always `False`. This is not the DRIVE witness boundary or
+permission to update needs, complete goals, or actuate tools.
 
 The existing tool-effect ledger is not that adjudicator: `COMMITTED` records a
 tool handler result or caller-reconciled outcome, not independent environmental
