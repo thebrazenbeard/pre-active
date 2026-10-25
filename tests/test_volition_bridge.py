@@ -763,7 +763,12 @@ def test_observation_context_excludes_private_user_text_and_paths_from_events(
     [
         lambda c: c["evidence"].update(api_key="not-a-valid-evidence-field"),
         lambda c: c.update(summary="x" * 8192),
+        lambda c: c.update(summary=" " * 1_000_000 + "private-summary"),
+        lambda c: c.update(observer_name=" " * 1_000_000 + "private-name"),
+        lambda c: c["initiative"].update(reason=" " * 1_000_000 + "on_change"),
+        lambda c: c["initiative"].update(policy_kind=" " * 1_000_000 + "on_change"),
         lambda c: c["evidence"].update(size=10**10000),
+        lambda c: c.update(change_count=10**10000),
         lambda c: c["initiative"]["metrics"].update(unbounded_user_input=1.0),
     ],
 )
@@ -784,12 +789,14 @@ def test_observation_context_rejects_unmodeled_or_unbounded_input_before_enqueue
     store.close()
 
 
+@pytest.mark.parametrize("goal", ["x" * 8192, " " * 8192 + "safe-goal"])
 def test_volition_signal_rejects_oversized_goal_text_before_enqueue(
     tmp_path: Path,
+    goal: str,
 ) -> None:
     store = Store(tmp_path / "state.db")
     bridge = VolitionBridge(store)
-    payload = _open_loop_payload("x" * 8192)
+    payload = _open_loop_payload(goal)
     with pytest.raises(InvalidVolitionSignal, match="target"):
         bridge.enqueue_signal(payload=payload, now=1.0)
     assert store.list_events(kind="volition.signal") == []

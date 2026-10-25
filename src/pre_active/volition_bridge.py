@@ -19,6 +19,7 @@ MAX_VOLITION_TEXT_CHARS = 256
 MAX_OBSERVATION_TEXT_CHARS = 512
 MAX_OBSERVATION_PATH_CHARS = 4096
 MAX_FILE_SIZE_BYTES = 2**63 - 1
+MAX_OBSERVATION_CHANGE_COUNT = 2**63 - 1
 _OPAQUE_ID = re.compile(r"[A-Za-z0-9:_-]{1,128}\Z")
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
 _FILE_EVIDENCE_FIELDS = frozenset({"path", "exists", "size", "mtime_ns", "sha256"})
@@ -197,7 +198,9 @@ class VolitionBridge:
     @staticmethod
     def _text(payload: dict[str, Any], key: str) -> str:
         value = payload.get(key)
-        if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str) or not value or len(value) > MAX_VOLITION_TEXT_CHARS:
+            raise InvalidVolitionSignal(f"volition signal {key} must be bounded text")
+        if not value.strip():
             raise InvalidVolitionSignal(f"volition signal {key} must be non-empty text")
         stripped = value.strip()
         if len(stripped) > MAX_VOLITION_TEXT_CHARS or any(
@@ -257,13 +260,13 @@ class VolitionBridge:
             "summary",
         ):
             value = raw[key]
-            if not isinstance(value, str) or not value.strip():
-                raise InvalidVolitionSignal(
-                    f"observation context {key} must be non-empty text"
-                )
-            if len(value) > MAX_OBSERVATION_TEXT_CHARS:
+            if not isinstance(value, str) or len(value) > MAX_OBSERVATION_TEXT_CHARS:
                 raise InvalidVolitionSignal(
                     f"observation context {key} exceeds text limit"
+                )
+            if not value.strip():
+                raise InvalidVolitionSignal(
+                    f"observation context {key} must be non-empty text"
                 )
         if _OPAQUE_ID.fullmatch(raw["observer_id"].strip()) is None:
             raise InvalidVolitionSignal(
@@ -278,9 +281,10 @@ class VolitionBridge:
             isinstance(change_count, bool)
             or not isinstance(change_count, int)
             or change_count < 0
+            or change_count > MAX_OBSERVATION_CHANGE_COUNT
         ):
             raise InvalidVolitionSignal(
-                "observation context change_count must be a non-negative integer"
+                "observation context change_count must be a bounded non-negative integer"
             )
         evidence = raw["evidence"]
         if not isinstance(evidence, dict):
@@ -321,9 +325,9 @@ class VolitionBridge:
             )
         for key in ("policy_kind", "reason"):
             value = initiative[key]
-            if not isinstance(value, str) or not value.strip():
+            if not isinstance(value, str) or len(value) > 64 or not value.strip():
                 raise InvalidVolitionSignal(
-                    f"observation context initiative {key} must be non-empty text"
+                    f"observation context initiative {key} must be bounded non-empty text"
                 )
         if initiative["policy_kind"] not in {"on_change", "hawkes_threshold"} or initiative[
             "reason"
