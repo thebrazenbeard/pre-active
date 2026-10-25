@@ -49,6 +49,97 @@ def test_volition_state_round_trip_uses_revision_cas(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("corrupt", [float("inf"), float("-inf"), "invalid-clock"])
+def test_existing_corrupt_volition_clock_fails_closed_without_rewriting_row(
+    tmp_path: Path, corrupt: object
+) -> None:
+    store = Store(tmp_path / "state.db")
+    store.save_volition_state(
+        VolitionEngine().snapshot(), expected_revision=0, now=1.0
+    )
+    store.connection.execute(
+        "UPDATE volition_state SET updated_at=? WHERE id=1", (corrupt,)
+    )
+    original = store.connection.execute(
+        "SELECT revision, snapshot_json, updated_at FROM volition_state WHERE id=1"
+    ).fetchone()
+
+    with pytest.raises(RuntimeError, match="stored Volition updated_at is not finite"):
+        store.get_volition_state()
+    with pytest.raises(RuntimeError, match="stored Volition updated_at is not finite"):
+        _apply_signal(
+            store, VolitionBridge(store), source_event_id="valid-next-signal",
+            payload=_open_loop_payload(), now=2.0,
+        )
+
+    restored = store.connection.execute(
+        "SELECT revision, snapshot_json, updated_at FROM volition_state WHERE id=1"
+    ).fetchone()
+    assert tuple(original) == tuple(restored)
+    assert store.get_volition_signal_receipt("valid-next-signal") is None
+    assert store.list_events(kind="autonomous.turn") == []
+    assert store.list_journal() == []
+    store.close()
+
+
+@pytest.mark.parametrize("persisted_clock", [500.0, 1e308])
+def test_future_persisted_clock_beyond_rollback_budget_does_not_poison_next_signal(
+    tmp_path: Path, persisted_clock: float
+) -> None:
+    store = Store(tmp_path / "state.db")
+    store.save_volition_state(
+        VolitionEngine().snapshot(), expected_revision=0, now=persisted_clock
+    )
+    original = store.connection.execute(
+        "SELECT revision, snapshot_json, updated_at FROM volition_state WHERE id=1"
+    ).fetchone()
+
+    with pytest.raises(RuntimeError, match="clock rollback bound"):
+        _apply_signal(
+            store, VolitionBridge(store), source_event_id="future-poison",
+            payload=_open_loop_payload(), now=2.0,
+        )
+
+    restored = store.connection.execute(
+        "SELECT revision, snapshot_json, updated_at FROM volition_state WHERE id=1"
+    ).fetchone()
+    assert tuple(original) == tuple(restored)
+    assert store.get_volition_signal_receipt("future-poison") is None
+    assert store.list_events(kind="autonomous.turn") == []
+    assert store.list_journal() == []
+    store.close()
+
+
+def test_clock_correction_at_bounded_rollback_limit_keeps_monotonic_anchor(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    store.save_volition_state(
+        VolitionEngine().snapshot(), expected_revision=0, now=302.0
+    )
+    receipt = _apply_signal(
+        store, VolitionBridge(store), source_event_id="allowed-backstep",
+        payload=_open_loop_payload(), now=2.0,
+    )
+    assert receipt["source_event_id"] == "allowed-backstep"
+    assert store.get_volition_state()["updated_at"] == pytest.approx(302.0)
+    store.close()
+
+
+@pytest.mark.parametrize("bad_now", [float("inf"), float("-inf"), float("nan"), True, "bad-clock"])
+def test_direct_state_save_does_not_write_invalid_clock(
+    tmp_path: Path, bad_now: object
+) -> None:
+    store = Store(tmp_path / "state.db")
+    with pytest.raises(ValueError, match="Volition state now must be a finite timestamp"):
+        store.save_volition_state(
+            VolitionEngine().snapshot(), expected_revision=0, now=bad_now
+        )
+    assert store.get_volition_state() is None
+    assert store.list_journal() == []
+    store.close()
+
+
 def test_volition_signal_receipt_round_trip_is_unique_by_source_event(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
 

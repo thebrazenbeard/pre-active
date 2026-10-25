@@ -251,6 +251,21 @@ Signal processing is receipt-bound and crash-consistent with the resulting Volit
 state revision and cognition event. Re-delivery of the same source event does not
 amplify into another turn.
 
+Persisted Volition `updated_at` values are checked for a numeric, finite clock
+before state restoration. A legacy row with an infinite, null, or nonnumeric
+timestamp fails explicitly without being rewritten or silently repaired.
+Direct state saves also reject invalid timestamps before inserting or updating.
+Recovery of historically corrupt rows requires separately authorized diagnosis;
+these guards establish detection and containment, not automatic migration.
+Signals whose event clock is behind the persisted Volition clock by **at most
+300 seconds** retain the existing monotonic-anchor semantics (small wall-clock
+corrections and limited reordering). A discrepancy over 300 seconds fails closed
+before Volition state restoration, writes, or cognition requests. This explicit
+source policy prevents a finite but implausibly far-future persisted anchor
+from indefinitely pinning Volition time; it does not repair that row or
+silently reset its clock. Operators must reconcile larger clock discrepancies
+under separate authority.
+
 ### MESO intent ingress (explicit producer API)
 
 This optional adapter connects a real `meso_crct.IntentProposal` through
