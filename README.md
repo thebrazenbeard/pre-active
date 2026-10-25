@@ -267,7 +267,7 @@ silently reset its clock. Operators must reconcile larger clock discrepancies
 under separate authority.
 
 **Volition V3 migration boundary.** The optional `volition`, `meso`, and `dev`
-extras pin `thebrazenbeard/volition@e728c04ce2405854f8a2f9e62c819a32670e89ef`
+extras pin `thebrazenbeard/volition@534907c3d88a941a194e1888abc1c11402a3df22`
 (the same verified source tree in every extra). A persisted V2 snapshot with
 no active goal or an unrevised revision-1 goal remains readable; the next
 successfully admitted signal writes a V3 snapshot under the ordinary durable
@@ -280,12 +280,25 @@ reappraisal. See Volition's `docs/REAPPRAISAL_SCORE_V3.md` for the source
 contract. The V3 scored receipt is internally consistent, not an externally
 authenticated appraisal or evidence of host installation.
 
+This source additionally separates scalar `record_satisfaction(target, amount)`
+from exact-goal `GOAL_COMPLETED`: a reported satiation change **cannot**
+complete a goal by itself. `GoalCompletionClaim` and caller-admitted
+`AdmittedGoalCompletion` bind an outcome event to the exact goal ID, choice ID,
+revision, and target, with replay checking across snapshot restore. The
+reference verifier is caller-asserted, not independently authenticated. Pre-Active
+does **not** issue that admission or turn outcome candidates into completed goals;
+a separately authorized, externally verifiable outcome adjudicator is still
+required. No new autonomous effect authority or runtime installation follows
+from updating the dependency pin.
+
 **MESO observation dependency boundary.** The optional `meso` and `dev`
-extras pin `thebrazenbeard/meso-crct@4ed527d31a68fc215158a520f1cd404e8f16b35b`,
+extras pin `thebrazenbeard/meso-crct@e35e39fc2e3608265871b3197ea6098a0f13299b`,
 which exposes the caller-admitted `NeedObservationLedger` and required
 `AdmissionClock` (UTC future ceiling, bounded skew). The corresponding test
-probes the imported immutable, no-effect update API. **Pinning this source does
-not wire Pre-Active outcome candidates to MESO need observations**, create a
+probes the imported immutable, no-effect update API and strict typed finite
+numeric ingress at MESO state boundaries. This validation does not establish
+that an asserted measurement is genuine. **Pinning this source does not wire
+Pre-Active outcome candidates to MESO need observations**, create a
 trusted observation source, persist an authenticated need ledger, authorize a
 Volition satisfaction update, or complete the feedback loop. The current
 outcome ledger remains an inert candidate store.
