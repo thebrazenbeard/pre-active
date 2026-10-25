@@ -149,6 +149,25 @@ CREATE TABLE IF NOT EXISTS volition_signal_receipts (
 CREATE UNIQUE INDEX IF NOT EXISTS volition_receipt_cognition_idx
 ON volition_signal_receipts(cognition_event_id)
 WHERE cognition_event_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS outcome_candidates (
+    event_id TEXT PRIMARY KEY,
+    claim_json TEXT NOT NULL,
+    claim_sha256 TEXT NOT NULL,
+    source_actor_id TEXT NOT NULL,
+    evidence_ref TEXT NOT NULL,
+    evidence_sha256 TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('CANDIDATE', 'REJECTED')),
+    reject_reason TEXT,
+    created_at REAL NOT NULL,
+    rejected_at REAL,
+    CHECK (
+        (status='CANDIDATE' AND reject_reason IS NULL AND rejected_at IS NULL)
+        OR (status='REJECTED' AND reject_reason IS NOT NULL AND rejected_at IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS outcome_candidates_expiry_idx
+ON outcome_candidates(status, expires_at);
 CREATE TABLE IF NOT EXISTS journal (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
