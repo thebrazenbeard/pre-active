@@ -663,18 +663,13 @@ def _observation_context() -> dict[str, object]:
         "observer_id": "observer-1",
         "observer_name": "ci-watch",
         "observer_kind": "file",
-        "digest": "abc123",
+        "digest": "c" * 64,
         "summary": "file snapshot changed",
         "change_count": 7,
-        "evidence": {
-            "exists": True,
-            "size": 42,
-            "capabilities": ["shell.exec"],
-            "effect_authority": True,
-        },
+        "evidence": {"exists": True, "size": 42, "sha256": "a" * 64},
         "initiative": {
             "policy_kind": "on_change",
-            "reason": "changed",
+            "reason": "on_change",
             "metrics": {},
         },
     }
@@ -701,9 +696,115 @@ def test_bridge_copies_valid_observation_context_into_endogenous_cognition(
     assert event["payload"]["source"] == "ENDOGENOUS"
     assert event["payload"]["capabilities"] == []
     assert event["payload"]["volition"]["effect_authority"] is False
-    assert event["payload"]["volition"]["observation_context"] == _observation_context()
+    context = event["payload"]["volition"]["observation_context"]
+    assert context["observer_id"] == "observer-1"
+    assert context["digest"] == "c" * 64
+    assert context["evidence"] == _observation_context()["evidence"]
+    assert context["observer_name"] == "observer-redacted"
+    assert context["summary"] == "file observed present"
     assert "Observation context (read-only):" in event["payload"]["task"]
-    assert '"observer_name":"ci-watch"' in event["payload"]["task"]
+    assert '"observer_name":"observer-redacted"' in event["payload"]["task"]
+    assert "ci-watch" not in event["payload"]["task"]
+    store.close()
+
+
+def test_observation_context_excludes_private_user_text_and_paths_from_events(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+    context = _observation_context()
+    context["observer_name"] = "private-observer-DO-NOT-RETAIN"
+    context["summary"] = "private-summary-DO-NOT-RETAIN"
+    context["evidence"] = {
+        "path": "/home/someone/private-folder-DO-NOT-RETAIN",
+        "exists": True,
+        "size": 42,
+        "mtime_ns": 123,
+        "sha256": "b" * 64,
+    }
+    payload = _open_loop_payload("safe-goal")
+    payload["observation_context"] = context
+
+    signal_id = bridge.enqueue_signal(payload=payload, now=1.0)
+    [source_event] = store.list_events(kind="volition.signal")
+    assert source_event["id"] == signal_id
+    source_bytes = json.dumps(source_event["payload"])
+    assert "DO-NOT-RETAIN" not in source_bytes
+    assert "private-folder" not in source_bytes
+    sanitized = source_event["payload"]["observation_context"]
+    assert sanitized["observer_id"] == context["observer_id"]
+    assert sanitized["digest"] == context["digest"]
+    assert sanitized["change_count"] == context["change_count"]
+    assert sanitized["evidence"] == {
+        "exists": True,
+        "size": 42,
+        "mtime_ns": 123,
+        "sha256": "b" * 64,
+    }
+
+    receipt = _apply_signal(
+        store,
+        bridge,
+        source_event_id=signal_id,
+        payload=source_event["payload"],
+        now=1.0,
+    )
+    assert receipt["cognition_event_id"] is not None
+    [cognition_event] = store.list_events(kind="autonomous.turn")
+    assert "DO-NOT-RETAIN" not in json.dumps(cognition_event["payload"])
+    assert "private-folder" not in json.dumps(cognition_event["payload"])
+    assert cognition_event["payload"]["volition"]["observation_context"] == sanitized
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda c: c["evidence"].update(api_key="not-a-valid-evidence-field"),
+        lambda c: c.update(summary="x" * 8192),
+        lambda c: c["evidence"].update(size=10**10000),
+        lambda c: c["initiative"]["metrics"].update(unbounded_user_input=1.0),
+    ],
+)
+def test_observation_context_rejects_unmodeled_or_unbounded_input_before_enqueue(
+    tmp_path: Path,
+    change,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+    payload = _open_loop_payload("safe-goal")
+    context = _observation_context()
+    change(context)
+    payload["observation_context"] = context
+
+    with pytest.raises(InvalidVolitionSignal, match="observation context"):
+        bridge.enqueue_signal(payload=payload, now=1.0)
+    assert store.list_events(kind="volition.signal") == []
+    store.close()
+
+
+def test_volition_signal_rejects_oversized_goal_text_before_enqueue(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+    payload = _open_loop_payload("x" * 8192)
+    with pytest.raises(InvalidVolitionSignal, match="target"):
+        bridge.enqueue_signal(payload=payload, now=1.0)
+    assert store.list_events(kind="volition.signal") == []
+    store.close()
+
+
+def test_volition_signal_rejects_unknown_free_text_payload_field_before_enqueue(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    payload = _open_loop_payload("safe-goal")
+    payload["raw_instructions"] = "private value must not persist"
+    with pytest.raises(InvalidVolitionSignal, match="unsupported fields"):
+        VolitionBridge(store).enqueue_signal(payload=payload, now=1.0)
+    assert store.list_events(kind="volition.signal") == []
     store.close()
 
 
@@ -755,7 +856,7 @@ def test_bridge_does_not_attach_context_for_different_active_goal(
     first_context = _observation_context()
     first_context["observer_id"] = "observer-A"
     first_context["observer_name"] = "observer-A"
-    first_context["digest"] = "digest-A"
+    first_context["digest"] = "a" * 64
     first_context["summary"] = "Only goal A changed"
     first_payload["observation_context"] = first_context
 
@@ -773,7 +874,7 @@ def test_bridge_does_not_attach_context_for_different_active_goal(
     second_context = _observation_context()
     second_context["observer_id"] = "observer-B"
     second_context["observer_name"] = "observer-B"
-    second_context["digest"] = "digest-B"
+    second_context["digest"] = "b" * 64
     second_context["summary"] = "Only goal B changed"
     second_payload["observation_context"] = second_context
 

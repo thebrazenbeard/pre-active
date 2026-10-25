@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 from .store import Store
@@ -14,6 +15,23 @@ class InvalidVolitionSignal(ValueError):
 # Small wall-clock corrections and modest event reordering are tolerated, but
 # a far-future durable anchor must not indefinitely freeze Volition time.
 MAX_VOLITION_CLOCK_BACKSTEP_SECONDS = 300.0
+MAX_VOLITION_TEXT_CHARS = 256
+MAX_OBSERVATION_TEXT_CHARS = 512
+MAX_OBSERVATION_PATH_CHARS = 4096
+MAX_FILE_SIZE_BYTES = 2**63 - 1
+_OPAQUE_ID = re.compile(r"[A-Za-z0-9:_-]{1,128}\Z")
+_SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
+_FILE_EVIDENCE_FIELDS = frozenset({"path", "exists", "size", "mtime_ns", "sha256"})
+_INITIATIVE_METRICS = frozenset({
+    "baseline_rate", "branching_ratio", "decayed_excitation",
+    "post_excitation", "post_intensity", "wake_threshold", "cooldown_remaining",
+})
+_SIGNAL_FIELDS = frozenset({
+    "target", "kind", "magnitude", "confidence", "provenance", "source",
+    "expected_information_gain", "learning_progress", "controllability",
+    "predicted_deficit_reduction", "current_reappraisal", "effect_authority",
+    "meso_source_event_id", "observation_context",
+})
 
 
 def _finite_timestamp(now: float) -> float:
@@ -52,7 +70,17 @@ class VolitionBridge:
     ) -> str:
         now = _finite_timestamp(now)
         self.parse_signal_payload(payload)
+        if set(payload) - _SIGNAL_FIELDS:
+            raise InvalidVolitionSignal("volition signal has unsupported fields")
         normalized = dict(payload)
+        for key in ("target", "kind", "provenance", "source"):
+            normalized[key] = self._text(payload, key)
+        if "meso_source_event_id" in payload:
+            normalized["meso_source_event_id"] = self._text(
+                payload, "meso_source_event_id"
+            )
+        if "observation_context" in payload:
+            normalized["observation_context"] = self._observation_context(payload)
         normalized["effect_authority"] = False
         return self.store.enqueue_event(
             kind="volition.signal",
@@ -171,7 +199,12 @@ class VolitionBridge:
         value = payload.get(key)
         if not isinstance(value, str) or not value.strip():
             raise InvalidVolitionSignal(f"volition signal {key} must be non-empty text")
-        return value.strip()
+        stripped = value.strip()
+        if len(stripped) > MAX_VOLITION_TEXT_CHARS or any(
+            ord(character) < 32 or ord(character) == 127 for character in stripped
+        ):
+            raise InvalidVolitionSignal(f"volition signal {key} must be bounded plain text")
+        return stripped
 
     @staticmethod
     def _number(
@@ -228,6 +261,18 @@ class VolitionBridge:
                 raise InvalidVolitionSignal(
                     f"observation context {key} must be non-empty text"
                 )
+            if len(value) > MAX_OBSERVATION_TEXT_CHARS:
+                raise InvalidVolitionSignal(
+                    f"observation context {key} exceeds text limit"
+                )
+        if _OPAQUE_ID.fullmatch(raw["observer_id"].strip()) is None:
+            raise InvalidVolitionSignal(
+                "observation context observer_id must be an opaque identifier"
+            )
+        if _SHA256.fullmatch(raw["digest"].strip()) is None:
+            raise InvalidVolitionSignal("observation context digest must be sha256")
+        if raw["observer_kind"].strip() != "file":
+            raise InvalidVolitionSignal("observation context observer_kind unsupported")
         change_count = raw["change_count"]
         if (
             isinstance(change_count, bool)
@@ -240,6 +285,31 @@ class VolitionBridge:
         evidence = raw["evidence"]
         if not isinstance(evidence, dict):
             raise InvalidVolitionSignal("observation context evidence must be an object")
+        if len(evidence) > len(_FILE_EVIDENCE_FIELDS) or set(evidence) - _FILE_EVIDENCE_FIELDS:
+            raise InvalidVolitionSignal("observation context evidence has unsupported fields")
+        if type(evidence.get("exists")) is not bool:
+            raise InvalidVolitionSignal("observation context evidence exists must be boolean")
+        safe_evidence: dict[str, Any] = {"exists": evidence["exists"]}
+        if "path" in evidence:
+            path = evidence["path"]
+            if not isinstance(path, str) or len(path) > MAX_OBSERVATION_PATH_CHARS:
+                raise InvalidVolitionSignal("observation context evidence path is invalid")
+            # Full paths are private host metadata, not cognition input.
+        for key in ("size", "mtime_ns"):
+            if key in evidence:
+                value = evidence[key]
+                if type(value) is not int or not (0 <= value <= MAX_FILE_SIZE_BYTES):
+                    raise InvalidVolitionSignal(
+                        f"observation context evidence {key} must be bounded nonnegative integer"
+                    )
+                safe_evidence[key] = value
+        if "sha256" in evidence:
+            digest = evidence["sha256"]
+            if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+                raise InvalidVolitionSignal("observation context evidence sha256 must be a digest")
+            safe_evidence["sha256"] = digest.lower()
+        if safe_evidence["exists"] is False and len(safe_evidence) != 1:
+            raise InvalidVolitionSignal("observation context absent-file evidence is inconsistent")
         initiative = raw["initiative"]
         if not isinstance(initiative, dict) or set(initiative) != {
             "policy_kind",
@@ -255,11 +325,17 @@ class VolitionBridge:
                 raise InvalidVolitionSignal(
                     f"observation context initiative {key} must be non-empty text"
                 )
+        if initiative["policy_kind"] not in {"on_change", "hawkes_threshold"} or initiative[
+            "reason"
+        ] not in {"on_change", "below_threshold", "cooldown", "threshold_met"}:
+            raise InvalidVolitionSignal("observation context initiative contains unknown policy text")
         metrics = initiative["metrics"]
         if not isinstance(metrics, dict):
             raise InvalidVolitionSignal(
                 "observation context initiative metrics must be an object"
             )
+        if len(metrics) > len(_INITIATIVE_METRICS) or set(metrics) - _INITIATIVE_METRICS:
+            raise InvalidVolitionSignal("observation context initiative metrics contain unknown keys")
         for key, value in metrics.items():
             if not isinstance(key, str) or not key:
                 raise InvalidVolitionSignal(
@@ -281,12 +357,14 @@ class VolitionBridge:
                 )
         return {
             "observer_id": raw["observer_id"].strip(),
-            "observer_name": raw["observer_name"].strip(),
-            "observer_kind": raw["observer_kind"].strip(),
+            # User-chosen labels and free-form summaries may contain paths,
+            # credentials or instructions. Preserve stable provenance instead.
+            "observer_name": "observer-redacted",
+            "observer_kind": "file",
             "digest": raw["digest"].strip(),
-            "summary": raw["summary"].strip(),
+            "summary": "file observed present" if safe_evidence["exists"] else "file observed absent",
             "change_count": int(change_count),
-            "evidence": dict(evidence),
+            "evidence": safe_evidence,
             "initiative": {
                 "policy_kind": initiative["policy_kind"].strip(),
                 "reason": initiative["reason"].strip(),

@@ -738,12 +738,16 @@ def test_volition_dispatch_emits_one_signal_and_no_direct_turn(tmp_path: Path) -
     assert int(event_row["priority"]) == 0
     context = event["payload"]["observation_context"]
     assert context["observer_id"] == observer_id
-    assert context["observer_name"] == "dispatch-volition-route"
+    assert context["observer_name"] == "observer-redacted"
     assert context["observer_kind"] == "file"
     assert context["digest"] == record["last_digest"]
-    assert context["summary"] == record["last_summary"]
+    assert context["summary"] == "file observed present"
     assert context["change_count"] == 1
-    assert context["evidence"] == record["last_evidence"]
+    assert context["evidence"] == {
+        key: value for key, value in record["last_evidence"].items() if key != "path"
+    }
+    assert record["last_evidence"]["path"] == str(watched)
+    assert str(watched) not in str(event["payload"])
     assert context["initiative"] == {
         "policy_kind": "on_change",
         "reason": record["initiative"]["last_decision"]["reason"],
@@ -973,7 +977,8 @@ def test_daemon_routes_observer_through_volition_to_zero_capability_run(
     assert run["capabilities"] == set()
     assert run["status"] == "RUNNING"
     assert "Observation context (read-only):" in run["task"]
-    assert "volition-daemon-file" in run["task"]
+    assert "volition-daemon-file" not in run["task"]
+    assert "observer-redacted" in run["task"]
 
     third = daemon.cycle(now=3.0)
     assert third.run_id == run_id
