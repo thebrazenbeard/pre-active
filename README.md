@@ -312,7 +312,7 @@ silently reset its clock. Operators must reconcile larger clock discrepancies
 under separate authority.
 
 **Volition V3 migration boundary.** The optional `volition`, `meso`, and `dev`
-extras pin `thebrazenbeard/volition@534907c3d88a941a194e1888abc1c11402a3df22`
+extras pin `thebrazenbeard/volition@53570902890852845599df9b997bad5fa68ac2f3`
 (the same verified source tree in every extra). A persisted V2 snapshot with
 no active goal or an unrevised revision-1 goal remains readable; the next
 successfully admitted signal writes a V3 snapshot under the ordinary durable
@@ -334,15 +334,18 @@ reference verifier is caller-asserted, not independently authenticated. Pre-Acti
 does **not** issue that admission or turn outcome candidates into completed goals;
 a separately authorized, externally verifiable outcome adjudicator is still
 required. No new autonomous effect authority or runtime installation follows
-from updating the dependency pin.
+from updating the dependency pin. The current verifier also bounds caller-supplied
+completion-claim iterable intake at 256 entries; that bounds collection, not the
+execution time of a hostile iterator's individual `next()` call.
 
 **MESO observation dependency boundary.** The optional `meso` and `dev`
-extras pin `thebrazenbeard/meso-crct@e35e39fc2e3608265871b3197ea6098a0f13299b`,
+extras pin `thebrazenbeard/meso-crct@14bd3f6a359fc267a5246ccfc1682cb4c0c1b2e4`,
 which exposes the caller-admitted `NeedObservationLedger` and required
 `AdmissionClock` (UTC future ceiling, bounded skew). The corresponding test
 probes the imported immutable, no-effect update API and strict typed finite
 numeric ingress at MESO state boundaries. This validation does not establish
-that an asserted measurement is genuine. **Pinning this source does not wire
+that an asserted measurement is genuine. Its verifier bounds untrusted claim
+iterable intake at 256 entries. **Pinning this source does not wire
 Pre-Active outcome candidates to MESO need observations**, create a
 trusted observation source, persist an authenticated need ledger, authorize a
 Volition satisfaction update, or complete the feedback loop. The current
