@@ -106,6 +106,35 @@ If a mutation handler loses its response after dispatch, Pre-Active records `ATT
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/EFFECT_AND_RECOVERY.md](docs/EFFECT_AND_RECOVERY.md), [docs/VERIFIED_PROGRESS.md](docs/VERIFIED_PROGRESS.md), and [docs/RUN_CONTRACT_AFFINITY.md](docs/RUN_CONTRACT_AFFINITY.md).
 
+## Inert outcome-candidate ledger
+
+`pre_active.outcomes.OutcomeLedger` can preserve typed claims that an action or
+observation changed a need. Each claim binds an event ID, need and goal IDs,
+optional action request ID, source identity assertion and revision, evidence
+reference and SHA-256 digest, claimed result/delta, and observation/expiry times.
+Its canonical `schema_version=1` payload is pinned for stable replay across
+future source revisions; unknown claim versions fail closed.
+The event ID is unique: an identical replay returns its original receipt, while
+a changed payload is rejected as an identity conflict. Expired or future claims
+are rejected, and stored candidates can be irreversibly rejected with an
+auditable journal entry. Expiry of already-stored candidates is materialized by
+calling `reject_expired(now=...)`; early `EXPIRED` decisions are refused. Ledger
+writes use savepoints inside existing host transactions so a journal failure
+cannot leave a half-written outcome row even if the host later commits. This
+module does not run a background timer.
+
+**All recorded claims are untrusted.** Even a source marked `observer` or a
+well-formed SHA-256 digest is only a caller assertion, not an authenticated
+observer or independently verified outcome. The only ledger states are
+`CANDIDATE` and `REJECTED`; there is deliberately no `VERIFIED` transition.
+Nothing in this module changes MESO needs, Volition satiation/goals, permissions,
+credentials, tools, scheduling, or host effects. A future separately reviewed
+source-custody and atomic application contract is required before a claim can
+reduce a need or complete a goal. V1 does not bind a need-state revision or
+clock authority, and the stored digest is not a signature or authenticity proof.
+Do not mistake this persistence feature for
+a closed motivational feedback loop or an installed runtime integration.
+
 ## Portfolio-derived design
 
 Before implementation, the then-accessible `thebrazenbeard` portfolio was swept at repository level: **70 repositories** were inventoried and their README surfaces inspected at that historical cut. The live portfolio has since grown; the 70-repository figure is provenance for the V1 donor sweep, not a current census. High-value public donors were then inspected more deeply. Pre-Active is self-contained; donor repositories are architecture/provenance inputs, not runtime dependencies.
