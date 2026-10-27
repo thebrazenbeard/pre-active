@@ -31,7 +31,9 @@ hint; the same `allow_autonomous_reentry=False` flag is used for both the
 advice gate and the offered tool specs. The callback receives only an
 opaque run ID, not a person model or task text, and may return `None`. The host
 must map that run ID to an explicitly authenticated, current, properly admitted
-Empathy hint. Nothing in the normal Pre-Active CLI config enables the callback.
+Empathy hint. The ordinary daemon cannot enable this callback. The `run-once`
+command offers a separate, exact-run-bound operator bridge (below), disabled
+by default.
 
 If advice is returned, the engine verifies a seven-member policy allowlist,
 boolean `focus_needed`, and exact `NONE`/`EPHEMERAL`/`RESPONSE_POLICY_ONLY`
@@ -78,6 +80,50 @@ engine = Engine(
 
 The sample's `private_host_admission_for_run` and `Engine(...)` arguments are
 intentionally incomplete; no such authenticated runtime is claimed here.
+
+## Exact-run operator bridge for actual model inference
+
+A trusted host can first authenticate the current person/run and admit current
+evidence. It must initialize a **new, separate, absolute SQLite state path**
+using `empathy-init` before submitting exactly one response-only task, derive
+a `ResponsePolicyHint` using Empathy, and launch a dedicated `run-once`
+worker with its policy and focus flag:
+
+```text
+python -m pre_active --state <new-private-state-db> empathy-init
+python -m pre_active --state <new-private-state-db> submit "<admitted-response-task>"
+python -m pre_active --state <new-private-state-db> run-once \
+  --target <qualified-model-target> \
+  --empathy-run-id <exact-response-run-id> \
+  --empathy-policy REPAIR_FIRST --empathy-focus-needed
+```
+
+The placeholders require real host choices; arguments must never be synthesized
+from task text or a model suggestion. The `empathy-init` command refuses an
+existing or relative path and refuses the standard ProgramData Pre-Active path.
+This mode is unavailable to the continuous `daemon` command. The adviser and
+response-only restriction apply **only** when the claimed run ID matches exactly.
+If the private database contains another run, queued event, schedule or memory,
+the exact worker fails closed. In this dedicated mode
+Pre-Active **does not tick the scheduler or observers and does not claim the
+general queue**. It atomically claims only a fresh, never-attempted, initial `run.step` for
+the exact run, or exits without inference. A missing/completed run, capability
+bearing run, incompatible contract, stale/already-attempted event, or autonomous step is rejected.
+The selected run must have zero capabilities. These flags do not authenticate a
+person, submit a run, read private evidence, or select a model target.
+
+An exclusive SQLite claim trigger is created **only in the freshly initialized
+private database**. It prevents both current and legacy generic workers from
+claiming that database's events, including after a special worker's lease
+expires. An expired/ambiguous dedicated claim remains quarantined for explicit
+operator reconciliation; it is never silently reclaimed by a generic daemon.
+Never point `empathy-init` or this dedicated worker at the production/shared
+`C:\ProgramData\PreActive\state\state.db`.
+
+The CLI is only a *carrier* for an operator-admitted policy; accepting a policy
+argument does not prove Empathy selected it or that the right person was
+identified. End-to-end qualification must inspect the actual host admission
+path and live model output separately before claiming operational empathy.
 
 ## Qualification and falsifiers
 
