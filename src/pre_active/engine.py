@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from .context import ContextAssembler
 from .contracts import RUN_CONTRACT_VERSION, validate_contract_version
+from .empathy_policy import EmpathyAdviser, render_empathy_advice
 from .lease import LeaseHeartbeat, LeaseLost
 from .store import Event, EventLeaseLost, Store
 from .tools import AmbiguousEffect, ToolError, ToolRegistry
@@ -159,6 +160,8 @@ class Engine:
         max_steps: int = 24,
         max_autonomous_turns_per_run: int = 16,
         max_consecutive_endogenous_turns: int = 2,
+        empathy_adviser: EmpathyAdviser | None = None,
+        empathy_response_only: bool = False,
         runtime_contract_version: int = RUN_CONTRACT_VERSION,
     ) -> None:
         self.store = store
@@ -170,6 +173,12 @@ class Engine:
             )
         self.context = context
         self.system_prompt = system_prompt
+        # Opt-in and trusted-host-only. The adviser has no durable state or
+        # capability mutation surface. Never derive it from task/event text.
+        self.empathy_adviser = empathy_adviser
+        if type(empathy_response_only) is not bool:
+            raise TypeError("empathy_response_only must be a boolean")
+        self.empathy_response_only = empathy_response_only
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
         self.lease_heartbeat_seconds = lease_heartbeat_seconds
@@ -245,14 +254,35 @@ class Engine:
             raise ValueError("autonomous turn delay_seconds must be finite and >= 0")
         return reason.strip(), delay_seconds
 
-    def _messages_for_run(self, run: dict[str, Any]) -> list[dict[str, str]]:
+    def _messages_for_run(
+        self, run: dict[str, Any], *, allow_autonomous_reentry: bool = True
+    ) -> list[dict[str, str]]:
         transcript = self.store.list_run_messages(run["id"])
         task = run["task"]
         if transcript:
             rendered = "\n".join(f"{m['role']}: {m['content']}" for m in transcript)
             task = f"{task}\n\nDurable run transcript:\n{rendered}"
+        system_prompt = self.system_prompt
+        # A person-specific response hint is meaningful only on an explicitly
+        # response-only run. Even a run with zero external capabilities may
+        # expose pre_active.request_turn as an internal tool, so withhold
+        # advice whenever autonomous re-entry is currently available.
+        if (
+            self.empathy_response_only
+            and self.empathy_adviser is not None
+            and not run["capabilities"]
+            and not allow_autonomous_reentry
+        ):
+            advice = self.empathy_adviser(run["id"])
+            if advice is not None:
+                rendered_advice = render_empathy_advice(advice)
+                # The advisory is deliberately constrained system-level
+                # framing, not a new authority or a replacement for the
+                # authorized task. Skip it if it would crowd out that task.
+                if len(system_prompt) + len(rendered_advice) + len(task) + 1 <= self.context.max_chars:
+                    system_prompt += rendered_advice
         return self.context.build(
-            system_prompt=self.system_prompt,
+            system_prompt=system_prompt,
             task=task,
             query=run["task"],
         )
@@ -629,12 +659,20 @@ class Engine:
             allow_autonomous_reentry = (
                 endogenous_depth < self.max_consecutive_endogenous_turns
             )
+            # An explicit response-only mode suppresses the *internal*
+            # request_turn tool too. Without this, a zero-capability run can
+            # still autonomously schedule another model turn after seeing
+            # person-specific advice. Default mode is unchanged.
+            if self.empathy_response_only and not run["capabilities"]:
+                allow_autonomous_reentry = False
             stored_decision = self.store.get_run_step_decision(
                 run_id=run_id, step=run["step_count"]
             )
             if stored_decision is None:
                 response = self.model.respond(
-                    messages=self._messages_for_run(run),
+                    messages=self._messages_for_run(
+                        run, allow_autonomous_reentry=allow_autonomous_reentry
+                    ),
                     tools=self._tool_specs_for_run(
                         run,
                         allow_autonomous_reentry=allow_autonomous_reentry,
