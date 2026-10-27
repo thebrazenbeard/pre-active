@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -61,6 +62,308 @@ def _load_volition() -> tuple[Any, Any, Any, Any]:
 class VolitionBridge:
     def __init__(self, store: Store) -> None:
         self.store = store
+
+    def record_operational_goal_completion(
+        self, *, admitted: object, now: float
+    ) -> dict[str, Any]:
+        """Clear an operational want only on exact external caller admission.
+
+        No automated model text/outcome claim is proof. Source authentication
+        and verifier accountability remain obligations of the integrating host.
+        """
+        now = _finite_timestamp(now)
+        from volition import AdmittedGoalCompletion
+        from volition.operational_drive import OperationalMotivation
+
+        if not isinstance(admitted, AdmittedGoalCompletion):
+            raise TypeError("operational completion requires caller-admitted evidence")
+        if self.store.connection.in_transaction:
+            raise RuntimeError("operational completion must own its transaction")
+        self.store.connection.execute("BEGIN IMMEDIATE")
+        try:
+            state = self.store.get_operational_motivation_state()
+            if state is None:
+                raise ValueError("no durable operational motivation goal exists")
+            previous_clock = float(state["updated_at"])
+            if previous_clock > now and (
+                previous_clock - now > MAX_VOLITION_CLOCK_BACKSTEP_SECONDS
+            ):
+                raise RuntimeError("operational motivation state exceeds clock rollback bound")
+            loop = OperationalMotivation.from_snapshot(state["snapshot"])
+            completed = loop.complete(admitted)
+            if completed:
+                anchor = max(now, previous_clock)
+                loop.advance(anchor - previous_clock)
+                revision = self.store.save_operational_motivation_state(
+                    loop.snapshot(), expected_revision=int(state["revision"]), now=anchor,
+                )
+                self.store.append_journal(
+                    event_type="OPERATIONAL_GOAL_COMPLETION_ADMITTED",
+                    subject_id=admitted.claim.outcome_event_id,
+                    payload={
+                        "goal_id": admitted.claim.goal_id,
+                        "choice_id": admitted.claim.choice_id,
+                        "result_receipt_id": admitted.claim.result_receipt_id,
+                        "verifier_id": admitted.verifier_id,
+                        "evidence_authenticity_asserted_by_caller": True,
+                        "effect_authority": False,
+                    },
+                    now=now,
+                )
+            else:
+                revision = int(state["revision"])
+            self.store.connection.execute("COMMIT")
+            return {
+                "outcome_event_id": admitted.claim.outcome_event_id,
+                "state_revision": revision,
+                "newly_completed": completed,
+                "effect_authority": False,
+            }
+        except BaseException:
+            self.store.connection.execute("ROLLBACK")
+            raise
+
+    def submit_model_want_proposal(
+        self,
+        *,
+        proposal: object,
+        admitted_observation: object,
+        now: float,
+    ) -> dict[str, Any]:
+        """Durably route an opt-in model candidate through Volition's owner.
+
+        The integrating host must authenticate its observation before obtaining
+        a caller admission. A model cannot construct that admission through this
+        method, and neither proposal text nor observation text is a tool task.
+        No effect, scheduler or remote host operation is ever conferred.
+        """
+        now = _finite_timestamp(now)
+        from volition.operational_drive import (
+            AdmittedObservation, ModelWantProposal, OperationalMotivation,
+        )
+
+        if not isinstance(proposal, ModelWantProposal) or not isinstance(
+            admitted_observation, AdmittedObservation
+        ):
+            raise TypeError("typed model proposal and caller-admitted observation required")
+        claim = admitted_observation.claim
+        # A model's natural-language target or explanation may contain prompt
+        # injection. Keep the executable cognition task to opaque identifiers.
+        if (
+            _OPAQUE_ID.fullmatch(proposal.target) is None
+            or _OPAQUE_ID.fullmatch(proposal.proposal_id) is None
+            or _OPAQUE_ID.fullmatch(claim.evidence_id) is None
+            or not claim.content_digest.startswith("sha256:")
+            or _SHA256.fullmatch(claim.content_digest[7:]) is None
+            or claim.content_digest != claim.content_digest.lower()
+        ):
+            raise ValueError("operational proposal requires opaque IDs and SHA-256 evidence")
+        if self.store.connection.in_transaction:
+            raise RuntimeError("operational proposal ingress must own its transaction")
+
+        request_digest = hashlib.sha256(json.dumps({
+            "proposal": {
+                "proposal_id": proposal.proposal_id,
+                "target": proposal.target,
+                "kind": proposal.kind.value,
+                "evidence_id": proposal.evidence_id,
+                "reason": proposal.reason,
+            },
+            "observation": {
+                "evidence_id": claim.evidence_id,
+                "content_digest": claim.content_digest.lower(),
+                "target": claim.target,
+                "kind": claim.kind.value,
+                "magnitude": claim.magnitude,
+                "confidence": claim.confidence,
+                "source_ref": claim.source_ref,
+                "provenance": claim.provenance.value,
+                "verifier_id": admitted_observation.verifier_id,
+            },
+        }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+        self.store.connection.execute("BEGIN IMMEDIATE")
+        try:
+            earlier = self.store.connection.execute(
+                "SELECT request_sha256,state_revision,goal_id,cognition_event_id "
+                "FROM operational_proposal_receipts WHERE proposal_id=?",
+                (proposal.proposal_id,),
+            ).fetchone()
+            if earlier is not None:
+                if earlier["request_sha256"] != request_digest:
+                    raise ValueError("operational proposal ID conflicts with prior evidence")
+                self.store.connection.execute("COMMIT")
+                return {
+                    "proposal_id": proposal.proposal_id,
+                    "state_revision": int(earlier["state_revision"]),
+                    "goal_id": earlier["goal_id"],
+                    "cognition_event_id": earlier["cognition_event_id"],
+                    "new_evidence": False,
+                    "effect_authority": False,
+                }
+
+            state = self.store.get_operational_motivation_state()
+            if state is None:
+                loop = OperationalMotivation()
+                revision = 0
+                anchor = now
+            else:
+                previous_clock = float(state["updated_at"])
+                if previous_clock > now and (
+                    previous_clock - now > MAX_VOLITION_CLOCK_BACKSTEP_SECONDS
+                ):
+                    raise RuntimeError("operational motivation state exceeds clock rollback bound")
+                loop = OperationalMotivation.from_snapshot(state["snapshot"])
+                revision = int(state["revision"])
+                anchor = max(previous_clock, now)
+                loop.advance(anchor - previous_clock)
+
+            before = loop.snapshot()
+            novel = (
+                claim.evidence_id not in before["evidence"]
+                and claim.content_digest not in before["digests"]
+            )
+            goal = loop.propose(proposal, admitted_observation)
+            cognition_event_id = None
+            if novel and goal is not None and goal.target == proposal.target:
+                request = loop.request_cognition()
+                if request is not None:
+                    if request.source != "ENDOGENOUS" or request.effect_authority is not False:
+                        raise RuntimeError("Volition cognition request claimed external authority")
+                    cognition_event_id = self.store.enqueue_event(
+                        kind="autonomous.turn",
+                        payload={
+                            "task": (
+                                "Review the active Volition goal with read-only cognition. "
+                                "Do not claim tools or external effects.\n\n"
+                                f"Goal ID: {request.goal_id}\n"
+                                f"Target identifier: {request.target}"
+                            ),
+                            "capabilities": [],
+                            "source": "ENDOGENOUS",
+                            "reason": "Volition admitted novel current evidence for a model-proposed goal",
+                            "volition": {
+                                "goal_id": request.goal_id,
+                                "target": request.target,
+                                "choice_class": "MODEL_PROPOSED",
+                                "proposal_id": proposal.proposal_id,
+                                "evidence_id": claim.evidence_id,
+                                "evidence_digest": claim.content_digest.lower(),
+                                "verifier_id": admitted_observation.verifier_id,
+                                "effect_authority": False,
+                            },
+                        },
+                        now=now,
+                        dedup_key=f"operational-cognition:{claim.content_digest.lower()}",
+                    )
+
+            saved_revision = self.store.save_operational_motivation_state(
+                loop.snapshot(), expected_revision=revision, now=anchor,
+            )
+            self.store.connection.execute(
+                "INSERT INTO operational_proposal_receipts "
+                "(proposal_id,request_sha256,state_revision,goal_id,cognition_event_id,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (proposal.proposal_id, request_digest, saved_revision,
+                 goal.goal_id if goal else None, cognition_event_id, now),
+            )
+            self.store.append_journal(
+                event_type="OPERATIONAL_MODEL_WANT_ADMITTED",
+                subject_id=proposal.proposal_id,
+                payload={
+                    "goal_id": goal.goal_id if goal else None,
+                    "cognition_event_id": cognition_event_id,
+                    "state_revision": saved_revision,
+                    "new_evidence": novel,
+                    "evidence_id": claim.evidence_id,
+                    "effect_authority": False,
+                },
+                now=now,
+            )
+            self.store.connection.execute("COMMIT")
+            return {
+                "proposal_id": proposal.proposal_id,
+                "state_revision": saved_revision,
+                "goal_id": goal.goal_id if goal else None,
+                "cognition_event_id": cognition_event_id,
+                "new_evidence": novel,
+                "effect_authority": False,
+            }
+        except BaseException:
+            self.store.connection.execute("ROLLBACK")
+            raise
+
+    def record_admitted_goal_completion(
+        self,
+        *,
+        admitted: object,
+        now: float,
+    ) -> dict[str, Any]:
+        """Persist an externally admitted exact-goal result, with no effects.
+
+        A Pre-Active model response, completed run, or OutcomeCandidate is not
+        verification. Only a caller-supplied Volition admission can enter this
+        seam. The caller is responsible for authenticating its evidence; this
+        bridge checks exact active goal lineage and durable replay only.
+        """
+        now = _finite_timestamp(now)
+        from volition import AdmittedGoalCompletion, VolitionEngine
+
+        if not isinstance(admitted, AdmittedGoalCompletion):
+            raise TypeError("goal completion requires external Volition admission")
+        if self.store.connection.in_transaction:
+            raise RuntimeError("goal completion ingress must own its transaction")
+
+        self.store.connection.execute("BEGIN IMMEDIATE")
+        try:
+            state = self.store.get_volition_state()
+            if state is None:
+                raise ValueError("cannot complete a goal without persisted Volition state")
+            updated_at = float(state["updated_at"])
+            if updated_at > now and (
+                updated_at - now > MAX_VOLITION_CLOCK_BACKSTEP_SECONDS
+            ):
+                raise RuntimeError("stored Volition updated_at exceeds admitted clock rollback bound")
+
+            engine = VolitionEngine.from_snapshot(state["snapshot"])
+            recorded = engine.complete_goal(admitted)
+            # Volition's persisted transition receipt is the replay source of
+            # truth. A repeated exact admission neither advances its clock nor
+            # increments its state revision nor credits satisfaction twice.
+            if recorded:
+                anchor = max(updated_at, now)
+                engine.advance(anchor - updated_at)
+                revision = self.store.save_volition_state(
+                    engine.snapshot(), expected_revision=int(state["revision"]),
+                    now=anchor,
+                )
+                self.store.append_journal(
+                    event_type="VOLITION_GOAL_COMPLETION_ADMITTED",
+                    subject_id=admitted.claim.outcome_event_id,
+                    payload={
+                        "goal_id": admitted.claim.goal_id,
+                        "choice_id": admitted.claim.choice_id,
+                        "goal_revision": admitted.claim.goal_revision,
+                        "result_receipt_id": admitted.claim.result_receipt_id,
+                        "verifier_id": admitted.verifier_id,
+                        "effect_authority": False,
+                        "evidence_authenticity_asserted_by_caller": True,
+                    },
+                    now=now,
+                )
+            else:
+                revision = int(state["revision"])
+            self.store.connection.execute("COMMIT")
+            return {
+                "outcome_event_id": admitted.claim.outcome_event_id,
+                "goal_id": admitted.claim.goal_id,
+                "state_revision": revision,
+                "newly_completed": recorded,
+                "effect_authority": False,
+            }
+        except BaseException:
+            self.store.connection.execute("ROLLBACK")
+            raise
 
     def enqueue_signal(
         self,
@@ -379,6 +682,8 @@ class VolitionBridge:
     def parse_signal_payload(self, payload: dict[str, Any]) -> Any:
         if not isinstance(payload, dict):
             raise InvalidVolitionSignal("volition signal payload must be an object")
+        if set(payload) - _SIGNAL_FIELDS:
+            raise InvalidVolitionSignal("volition signal has unsupported fields")
         if payload.get("effect_authority", False) is not False:
             raise InvalidVolitionSignal("volition signal cannot claim effect authority")
         self._observation_context(payload)
@@ -433,8 +738,45 @@ class VolitionBridge:
             raise RuntimeError(
                 "volition signal processing requires an active store transaction"
             )
+        # A caller that reuses a durable event identity with changed evidence
+        # must never borrow the old receipt as authorization for the new text.
+        self.parse_signal_payload(payload)
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
         existing = self.store.get_volition_signal_receipt(source_event_id)
         if existing is not None:
+            bound = self.store.get_volition_signal_receipt_digest(source_event_id)
+            if bound is None:
+                # Pre-digest receipt migration: only backfill from the durable
+                # immutable event originally processed, never a caller's new
+                # payload or a receipt manufactured without a source event.
+                original = self.store.connection.execute(
+                    "SELECT kind, payload_json FROM events WHERE id=?",
+                    (source_event_id,),
+                ).fetchone()
+                if original is not None and original["kind"] == "volition.signal":
+                    stored_hash = hashlib.sha256(
+                        original["payload_json"].encode("utf-8")
+                    ).hexdigest()
+                    if (
+                        stored_hash == fingerprint
+                        and existing["target"] == payload["target"]
+                        and existing["provenance"] == payload["provenance"]
+                        and existing["signal_source"] == payload["source"]
+                    ):
+                        self.store.connection.execute(
+                            "UPDATE volition_signal_receipts SET signal_sha256=? "
+                            "WHERE source_event_id=? AND signal_sha256 IS NULL",
+                            (fingerprint, source_event_id),
+                        )
+                        bound = fingerprint
+            if bound != fingerprint:
+                raise InvalidVolitionSignal(
+                    "volition signal identity is not bound to the same evidence"
+                )
             return existing
 
         signal = self.parse_signal_payload(payload)
@@ -556,6 +898,7 @@ class VolitionBridge:
             choice_class=choice.choice_class.value if choice else None,
             choice_source=choice.source if choice else None,
             now=now,
+            signal_sha256=fingerprint,
         )
         self.store.append_journal(
             event_type="VOLITION_SIGNAL_APPLIED",

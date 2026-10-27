@@ -312,7 +312,7 @@ silently reset its clock. Operators must reconcile larger clock discrepancies
 under separate authority.
 
 **Volition V3 migration boundary.** The optional `volition`, `meso`, and `dev`
-extras pin `thebrazenbeard/volition@53570902890852845599df9b997bad5fa68ac2f3`
+extras pin `thebrazenbeard/volition@7f7174b275cc24b7b8cd30ffdb444e512f29827c`
 (the same verified source tree in every extra). A persisted V2 snapshot with
 no active goal or an unrevised revision-1 goal remains readable; the next
 successfully admitted signal writes a V3 snapshot under the ordinary durable
@@ -562,6 +562,40 @@ schemas/                     wire/data contracts
 tests/                       deterministic behavioral tests
 docs/                        architecture, effect model, donor audit
 ```
+
+### Opt-in operational motivation integration (source-only)
+
+The `VolitionBridge.submit_model_want_proposal(...)` API is a narrow integration
+boundary for persistent model-proposed wants. An integrating caller obtains a
+read-only **current** observation, independently checks its source, constructs a
+Volition `ObservationClaim` with a canonical `sha256:<64 lowercase hex>` digest,
+and explicitly allowlists the exact claim using `ObservationVerifier`. A model
+may then suggest a typed `ModelWantProposal` that matches the admitted target,
+kind and evidence ID. This is a proposal, not observed fact or effect authority.
+
+Pre-Active persists `OperationalMotivation.snapshot()` using a revision-checked
+SQLite row, with an immutable proposal-ID receipt. Volition owns the durable
+wants, `MODEL_PROPOSED` policy-gated choice, freshness/replay ledger and
+protection latch. Only a genuinely new admitted evidence digest can cause a
+zero-capability `ENDOGENOUS` cognition event; replay or changed payload under
+the same proposal ID cannot mint additional turns. Model wording and read-only
+source text are **not** copied into the cognition prompt. There is no new
+scheduler, autonomous effect permission, or automatic source admission.
+
+A model's final text or an `OutcomeCandidate` remains an unverified claim. The
+explicit `record_operational_goal_completion(...)` API accepts only an exact
+Volition `AdmittedGoalCompletion`, issued by a caller-managed verifier for the
+active goal/choice/revision/result. This ensures durable lineage and replay
+without independently authenticating the caller or its evidence. Real-world
+verification remains the host application's responsibility.
+
+This adapter is **not deployed or activated by merely importing it**. The
+integrating host still must connect a trusted observation producer, a real
+model-proposal generator, and an independently accountable result verifier.
+Tests provide fake file observation and fake reasoning only. Until the new
+Volition operational-drive code is merged and released, this source adapter
+depends on that **stacked Volition change**; the existing pinned Volition
+dependency is intentionally not changed to an unpublished revision.
 
 ## Non-goals
 

@@ -127,6 +127,20 @@ CREATE TABLE IF NOT EXISTS volition_state (
     revision INTEGER NOT NULL CHECK (revision >= 1),
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS operational_motivation_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    snapshot_json TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS operational_proposal_receipts (
+    proposal_id TEXT PRIMARY KEY,
+    request_sha256 TEXT NOT NULL,
+    state_revision INTEGER NOT NULL,
+    goal_id TEXT,
+    cognition_event_id TEXT,
+    created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS meso_intent_ingress (
     source_event_id TEXT PRIMARY KEY,
     intent_json TEXT NOT NULL,
@@ -135,6 +149,7 @@ CREATE TABLE IF NOT EXISTS meso_intent_ingress (
 );
 CREATE TABLE IF NOT EXISTS volition_signal_receipts (
     source_event_id TEXT PRIMARY KEY,
+    signal_sha256 TEXT,
     state_revision INTEGER NOT NULL CHECK (state_revision >= 1),
     cognition_event_id TEXT,
     goal_id TEXT,
@@ -243,6 +258,15 @@ class Store:
             }
             if "message_key" not in message_columns:
                 self.connection.execute("ALTER TABLE run_messages ADD COLUMN message_key TEXT")
+            volition_receipt_columns = {
+                row["name"] for row in self.connection.execute(
+                    "PRAGMA table_info(volition_signal_receipts)"
+                )
+            }
+            if "signal_sha256" not in volition_receipt_columns:
+                self.connection.execute(
+                    "ALTER TABLE volition_signal_receipts ADD COLUMN signal_sha256 TEXT"
+                )
             self.connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS run_messages_key_idx "
                 "ON run_messages(run_id, message_key) WHERE message_key IS NOT NULL"
@@ -1461,6 +1485,46 @@ class Store:
             "created_at": float(row["created_at"]),
         }
 
+    def get_volition_signal_receipt_digest(self, source_event_id: str) -> str | None:
+        row = self.connection.execute(
+            "SELECT signal_sha256 FROM volition_signal_receipts WHERE source_event_id=?",
+            (source_event_id,),
+        ).fetchone()
+        return None if row is None else row["signal_sha256"]
+
+    def get_operational_motivation_state(self) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT revision, snapshot_json, updated_at FROM operational_motivation_state WHERE id=1"
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "revision": int(row["revision"]),
+            "snapshot": json.loads(row["snapshot_json"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    def save_operational_motivation_state(
+        self, snapshot: dict[str, Any], *, expected_revision: int, now: float
+    ) -> int:
+        serialized = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        new_revision = expected_revision + 1
+        if expected_revision == 0:
+            cursor = self.connection.execute(
+                "INSERT OR IGNORE INTO operational_motivation_state "
+                "(id,snapshot_json,revision,updated_at) VALUES (1,?,?,?)",
+                (serialized, new_revision, now),
+            )
+        else:
+            cursor = self.connection.execute(
+                "UPDATE operational_motivation_state SET snapshot_json=?,revision=?,updated_at=? "
+                "WHERE id=1 AND revision=?",
+                (serialized, new_revision, now, expected_revision),
+            )
+        if cursor.rowcount != 1:
+            raise RuntimeError("operational motivation state revision changed")
+        return new_revision
+
     def record_volition_signal_receipt(
         self,
         *,
@@ -1476,6 +1540,7 @@ class Store:
         choice_class: str | None,
         choice_source: str | None,
         now: float,
+        signal_sha256: str | None = None,
     ) -> None:
         if not source_event_id:
             raise ValueError("source_event_id is required")
@@ -1491,13 +1556,14 @@ class Store:
             self.connection.execute(
                 """
                 INSERT INTO volition_signal_receipts (
-                    source_event_id, state_revision, cognition_event_id, goal_id,
+                    source_event_id, signal_sha256, state_revision, cognition_event_id, goal_id,
                     target, urgency, provenance, signal_source, choice_id,
                     choice_class, choice_source, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source_event_id,
+                    signal_sha256,
                     int(state_revision),
                     cognition_event_id,
                     goal_id,
