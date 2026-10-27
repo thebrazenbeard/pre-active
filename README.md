@@ -312,7 +312,7 @@ silently reset its clock. Operators must reconcile larger clock discrepancies
 under separate authority.
 
 **Volition V3 migration boundary.** The optional `volition`, `meso`, and `dev`
-extras pin `thebrazenbeard/volition@53570902890852845599df9b997bad5fa68ac2f3`
+extras pin `thebrazenbeard/volition@7f7174b275cc24b7b8cd30ffdb444e512f29827c`
 (the same verified source tree in every extra). A persisted V2 snapshot with
 no active goal or an unrevised revision-1 goal remains readable; the next
 successfully admitted signal writes a V3 snapshot under the ordinary durable
