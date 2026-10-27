@@ -21,7 +21,10 @@ from pre_active.engine import Engine, ModelResponse
 from pre_active.store import Store
 from pre_active.tools import ToolRegistry
 from pre_active.volition_bridge import InvalidVolitionSignal, VolitionBridge
-from volition import DriveKind, Policy, Signal, VolitionEngine
+from volition import (
+    DriveKind, GoalCompletionClaim, GoalCompletionVerifier, Policy,
+    ProvenanceClass, Signal, VolitionEngine,
+)
 
 
 def test_volition_state_round_trip_uses_revision_cas(tmp_path: Path) -> None:
@@ -369,6 +372,162 @@ def test_bridge_replay_does_not_advance_state_or_duplicate_cognition(
     assert repeated == first
     assert store.get_volition_state()["revision"] == 1
     assert len(store.list_events(kind="autonomous.turn")) == 1
+
+
+def test_replayed_signal_event_id_with_changed_evidence_fails_closed(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+    original_payload = _open_loop_payload()
+    first = _apply_signal(
+        store, bridge, source_event_id="immutable-signal-1",
+        payload=original_payload, now=1.0,
+    )
+    original_state = store.get_volition_state()
+    changed_payload = dict(original_payload)
+    changed_payload["target"] = "other-target"
+    with pytest.raises(InvalidVolitionSignal, match="same evidence"):
+        _apply_signal(
+            store, bridge, source_event_id="immutable-signal-1",
+            payload=changed_payload, now=2.0,
+        )
+    assert store.get_volition_state() == original_state
+    assert store.get_volition_signal_receipt("immutable-signal-1") == first
+    assert len(store.list_events(kind="autonomous.turn")) == 1
+    store.close()
+
+
+def test_legacy_unbound_receipt_backfills_only_from_matching_persisted_event(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    payload = _open_loop_payload()
+    source_id = VolitionBridge(store).enqueue_signal(
+        payload=payload, now=1.0,
+    )
+    stored_payload = store.list_events(kind="volition.signal")[0]["payload"]
+    store.record_volition_signal_receipt(
+        source_event_id=source_id,
+        state_revision=1,
+        cognition_event_id=None,
+        goal_id=None,
+        target=payload["target"],
+        urgency=None,
+        provenance=payload["provenance"],
+        signal_source=payload["source"],
+        choice_id=None,
+        choice_class=None,
+        choice_source=None,
+        now=1.0,
+    )
+    assert store.get_volition_signal_receipt_digest(source_id) is None
+    first = _apply_signal(
+        store, VolitionBridge(store), source_event_id=source_id,
+        payload=stored_payload, now=2.0,
+    )
+    assert first["source_event_id"] == source_id
+    assert store.get_volition_signal_receipt_digest(source_id) is not None
+    with pytest.raises(InvalidVolitionSignal, match="same evidence"):
+        _apply_signal(
+            store, VolitionBridge(store), source_event_id=source_id,
+            payload={**stored_payload, "target": "changed"}, now=3.0,
+        )
+    store.close()
+
+
+def _external_completion_for(receipt: dict[str, object]) -> object:
+    assert isinstance(receipt["goal_id"], str)
+    assert isinstance(receipt["choice_id"], str)
+    claim = GoalCompletionClaim(
+        outcome_event_id="external-result-1",
+        goal_id=receipt["goal_id"],
+        choice_id=receipt["choice_id"],
+        goal_revision=1,
+        target="investigate",
+        result_receipt_id="external-readonly-check-1",
+        evidence_ref="observer:verified-readonly-check-1",
+        source_ref="external-observer:1",
+        provenance=ProvenanceClass.CURRENT_OBSERVATION,
+    )
+    return GoalCompletionVerifier(
+        [claim], verifier_id="independent-fixture-verifier"
+    ).admit(claim)
+
+
+def test_external_admission_completes_exact_persisted_goal_once_across_restart(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.db"
+    store = Store(path)
+    bridge = VolitionBridge(store)
+    receipt = _apply_signal(
+        store, bridge, source_event_id="signal-for-external-result",
+        payload=_open_loop_payload(), now=1.0,
+    )
+    admitted = _external_completion_for(receipt)
+    first = bridge.record_admitted_goal_completion(admitted=admitted, now=2.0)
+    assert first == {
+        "outcome_event_id": "external-result-1",
+        "goal_id": receipt["goal_id"],
+        "state_revision": 2,
+        "newly_completed": True,
+        "effect_authority": False,
+    }
+    assert VolitionEngine.from_snapshot(
+        store.get_volition_state()["snapshot"]
+    ).active_goal is None
+    store.close()
+
+    store = Store(path)
+    second = VolitionBridge(store).record_admitted_goal_completion(
+        admitted=admitted, now=3.0,
+    )
+    assert second["newly_completed"] is False
+    assert second["state_revision"] == 2
+    assert len([
+        row for row in store.list_journal()
+        if row["event_type"] == "VOLITION_GOAL_COMPLETION_ADMITTED"
+    ]) == 1
+    assert len(store.list_events(kind="autonomous.turn")) == 1
+    store.close()
+
+
+def test_model_report_and_wrong_lineage_cannot_complete_persisted_goal(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    bridge = VolitionBridge(store)
+    receipt = _apply_signal(
+        store, bridge, source_event_id="signal-model-report",
+        payload=_open_loop_payload(), now=1.0,
+    )
+    original = store.get_volition_state()
+    with pytest.raises(TypeError, match="external Volition admission"):
+        bridge.record_admitted_goal_completion(
+            admitted={"claimed_outcome": "SUCCESS", "goal_id": receipt["goal_id"]},
+            now=2.0,
+        )
+    wrong = GoalCompletionClaim(
+        outcome_event_id="external-result-wrong-goal",
+        goal_id="goal-other",
+        choice_id=receipt["choice_id"],
+        goal_revision=1,
+        target="investigate",
+        result_receipt_id="external-result-receipt",
+        evidence_ref="observer:verified-readonly-check-2",
+        source_ref="external-observer:2",
+        provenance=ProvenanceClass.CURRENT_OBSERVATION,
+    )
+    admitted = GoalCompletionVerifier([wrong], verifier_id="external-fixture").admit(wrong)
+    with pytest.raises(ValueError, match="exact active goal"):
+        bridge.record_admitted_goal_completion(admitted=admitted, now=2.0)
+    assert store.get_volition_state() == original
+    assert not any(
+        row["event_type"] == "VOLITION_GOAL_COMPLETION_ADMITTED"
+        for row in store.list_journal()
+    )
+    store.close()
 
 
 def test_bridge_persists_volition_cognition_budget_across_signals(tmp_path: Path) -> None:

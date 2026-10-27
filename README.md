@@ -563,6 +563,40 @@ tests/                       deterministic behavioral tests
 docs/                        architecture, effect model, donor audit
 ```
 
+### Opt-in operational motivation integration (source-only)
+
+The `VolitionBridge.submit_model_want_proposal(...)` API is a narrow integration
+boundary for persistent model-proposed wants. An integrating caller obtains a
+read-only **current** observation, independently checks its source, constructs a
+Volition `ObservationClaim` with a canonical `sha256:<64 lowercase hex>` digest,
+and explicitly allowlists the exact claim using `ObservationVerifier`. A model
+may then suggest a typed `ModelWantProposal` that matches the admitted target,
+kind and evidence ID. This is a proposal, not observed fact or effect authority.
+
+Pre-Active persists `OperationalMotivation.snapshot()` using a revision-checked
+SQLite row, with an immutable proposal-ID receipt. Volition owns the durable
+wants, `MODEL_PROPOSED` policy-gated choice, freshness/replay ledger and
+protection latch. Only a genuinely new admitted evidence digest can cause a
+zero-capability `ENDOGENOUS` cognition event; replay or changed payload under
+the same proposal ID cannot mint additional turns. Model wording and read-only
+source text are **not** copied into the cognition prompt. There is no new
+scheduler, autonomous effect permission, or automatic source admission.
+
+A model's final text or an `OutcomeCandidate` remains an unverified claim. The
+explicit `record_operational_goal_completion(...)` API accepts only an exact
+Volition `AdmittedGoalCompletion`, issued by a caller-managed verifier for the
+active goal/choice/revision/result. This ensures durable lineage and replay
+without independently authenticating the caller or its evidence. Real-world
+verification remains the host application's responsibility.
+
+This adapter is **not deployed or activated by merely importing it**. The
+integrating host still must connect a trusted observation producer, a real
+model-proposal generator, and an independently accountable result verifier.
+Tests provide fake file observation and fake reasoning only. Until the new
+Volition operational-drive code is merged and released, this source adapter
+depends on that **stacked Volition change**; the existing pinned Volition
+dependency is intentionally not changed to an unpublished revision.
+
 ## Non-goals
 
 V1 is not a distributed consensus system, a universal authorization service, a sandbox for untrusted code, a secret manager, or proof that an external effect occurred merely because a tool handler returned success. It does not force-kill in-flight tool handlers or claim a cancellation stopped an already-dispatched external operation. It also does not make a model continuously active unless a host process is running the daemon.
