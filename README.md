@@ -592,10 +592,29 @@ verification remains the host application's responsibility.
 This adapter is **not deployed or activated by merely importing it**. The
 integrating host still must connect a trusted observation producer, a real
 model-proposal generator, and an independently accountable result verifier.
-Tests provide fake file observation and fake reasoning only. Until the new
-Volition operational-drive code is merged and released, this source adapter
-depends on that **stacked Volition change**; the existing pinned Volition
-dependency is intentionally not changed to an unpublished revision.
+Tests provide fake file observation and fake reasoning only. This adapter
+originally depended on a stacked Volition change. The current optional
+dependency is now pinned to the merged
+Volition commit `7f7174b275cc24b7b8cd30ffdb444e512f29827c`. That source
+pin is not evidence that a workstation has installed or activated the bridge.
+
+### Opt-in Empathy response-policy consumer (source-only)
+
+An integrating host may explicitly opt into
+`Engine(..., empathy_response_only=True, empathy_adviser=callback)` for
+**zero-capability response-only** runs. This mode suppresses internal
+`pre_active.request_turn` for such runs, even when the adviser returns no
+hint. The default mode leaves existing autonomous behavior unchanged.
+The callback must provide a trusted,
+already-admitted `EmpathyAdvisory`; Pre-Active only passes its allowlisted
+policy and focus flag to the model as advisory response framing. It never
+queries a person model, creates a task or want, expands tools, or persists
+the policy hint. Neither capability-bearing nor autonomous-reentry-enabled
+turns call the adviser.
+
+This is not enabled by the default CLI and does not authenticate users,
+freshness, private evidence, correction or withdrawal. See
+[`docs/EMPATHY_RESPONSE_POLICY_BRIDGE_V1.md`](docs/EMPATHY_RESPONSE_POLICY_BRIDGE_V1.md).
 
 ## Non-goals
 
