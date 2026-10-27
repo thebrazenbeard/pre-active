@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import secrets
 import sys
 import time
 from typing import Sequence
@@ -11,6 +12,7 @@ from typing import Sequence
 from .context import ContextAssembler
 from .contracts import RUN_CONTRACT_VERSION
 from .daemon import Daemon
+from .empathy_policy import EmpathyAdvisory, render_empathy_advice
 from .engine import Engine
 from .observers import ObserverManager
 from .model_targets import (
@@ -40,6 +42,29 @@ def _submit(store: Store, task: str, capabilities: set[str], now: float) -> str:
 
 
 def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
+    # These arguments are supplied by the trusted host/operator, never derived
+    # from a run's task text or from the model's own output. Scope them to one
+    # exact run, so another queued person's task cannot inherit the hint or
+    # lose its internal re-entry tool.
+    empathy_run_id = getattr(args, "empathy_run_id", None)
+    empathy_policy = getattr(args, "empathy_policy", None)
+    empathy_focus_needed = getattr(args, "empathy_focus_needed", False)
+    if bool(empathy_run_id) != bool(empathy_policy):
+        raise SystemExit(
+            "--empathy-run-id and --empathy-policy must be supplied together"
+        )
+    if empathy_focus_needed and not empathy_policy:
+        raise SystemExit("--empathy-focus-needed requires a bound empathy policy")
+    adviser = None
+    if empathy_policy:
+        advice = EmpathyAdvisory(
+            policy=empathy_policy, focus_needed=empathy_focus_needed
+        )
+        render_empathy_advice(advice)
+
+        def adviser(run_id: str) -> EmpathyAdvisory | None:
+            return advice if run_id == empathy_run_id else None
+
     if args.base_url or args.model:
         try:
             target = resolve_model_target(
@@ -90,7 +115,10 @@ def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
         tools=tools,
         context=ContextAssembler(store, max_chars=args.context_chars),
         system_prompt=args.system_prompt,
-        worker_id=args.worker_id,
+        worker_id=(
+            f"empathy-once-{secrets.token_hex(16)}"
+            if empathy_run_id else args.worker_id
+        ),
         lease_seconds=args.lease_seconds,
         lease_heartbeat_seconds=args.lease_heartbeat_seconds,
         max_lease_extension_seconds=args.max_lease_extension_seconds,
@@ -98,6 +126,9 @@ def _runtime(args: argparse.Namespace, store: Store) -> Daemon:
         max_steps=args.max_steps,
         max_autonomous_turns_per_run=args.max_autonomous_turns_per_run,
         max_consecutive_endogenous_turns=args.max_consecutive_endogenous_turns,
+        empathy_adviser=adviser,
+        empathy_response_only=bool(empathy_policy),
+        empathy_response_run_id=empathy_run_id,
     )
     return Daemon(
         scheduler=Scheduler(store),
@@ -110,6 +141,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pre-active")
     parser.add_argument("--state", default=".pre-active/state.db", help="SQLite state path")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser(
+        "empathy-init",
+        help="initialize a NEW isolated response-only SQLite state file",
+    )
 
     submit = sub.add_parser("submit", help="submit a durable task")
     submit.add_argument("task")
@@ -340,6 +376,24 @@ def build_parser() -> argparse.ArgumentParser:
         run.add_argument("--max-steps", type=int, default=24)
         run.add_argument("--max-autonomous-turns-per-run", type=int, default=16)
         run.add_argument("--max-consecutive-endogenous-turns", type=int, default=2)
+        if name == "run-once":
+            run.add_argument(
+                "--empathy-run-id",
+                help="one exact host-authenticated response run for an admitted Empathy hint",
+            )
+            run.add_argument(
+                "--empathy-policy",
+                choices=[
+                    "CLARIFY_MEANING", "TASK_DIRECT", "REPAIR_FIRST",
+                    "CELEBRATE_FIRST", "TRUTHFUL_CHALLENGE",
+                    "PRESERVE_PLAY", "STOP_PLAY",
+                ],
+                help="operator-admitted response policy; not inferred from task text",
+            )
+            run.add_argument(
+                "--empathy-focus-needed", action="store_true",
+                help="mark only that run for focused response review",
+            )
         if name == "daemon":
             run.add_argument("--poll-seconds", type=float, default=1.0)
 
@@ -349,6 +403,26 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     now = time.time()
+    if args.command == "empathy-init":
+        # Never initialize an existing/production state DB, and never infer
+        # isolation from a conventional shared state path.
+        path = Path(args.state)
+        normalized = str(path).replace("/", "\\").casefold()
+        if (
+            not path.is_absolute()
+            or path.exists()
+            or "\\programdata\\preactive\\" in normalized
+        ):
+            raise SystemExit(
+                "empathy-init requires a new absolute non-ProgramData state path"
+            )
+        store = _open_store(str(path))
+        try:
+            store.initialize_private_empathy_state(now=now)
+        finally:
+            store.close()
+        print(json.dumps({"state": str(path), "mode": "RESPONSE_ONLY_V1"}))
+        return 0
     store = _open_store(args.state)
     try:
         if args.command == "submit":
@@ -768,20 +842,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         runtime = _runtime(args, store)
         if args.command == "run-once":
-            result = runtime.cycle(now=now)
-            print(
-                json.dumps(
-                    {
-                        "emitted_events": result.emitted_events,
-                        "observer_samples": result.observer_samples,
-                        "observer_events": result.observer_events,
-                        "observer_errors": result.observer_errors,
-                        "schedule_events": result.schedule_events,
-                        "run_id": result.run_id,
-                    },
-                    sort_keys=True,
-                )
-            )
+            if args.empathy_run_id:
+                # Dedicated response path: do not tick observers/scheduler,
+                # nor claim a shared-queue event before the selected run.
+                try:
+                    exact_run_id = runtime.engine.run_once(
+                        now=now, exact_response_run_id=args.empathy_run_id
+                    )
+                except ValueError as exc:
+                    raise SystemExit(str(exc)) from exc
+                summary = {
+                    "emitted_events": 0, "observer_samples": 0,
+                    "observer_events": 0, "observer_errors": 0,
+                    "schedule_events": 0, "run_id": exact_run_id,
+                }
+            else:
+                result = runtime.cycle(now=now)
+                summary = {
+                    "emitted_events": result.emitted_events,
+                    "observer_samples": result.observer_samples,
+                    "observer_events": result.observer_events,
+                    "observer_errors": result.observer_errors,
+                    "schedule_events": result.schedule_events,
+                    "run_id": result.run_id,
+                }
+            print(json.dumps(summary, sort_keys=True))
             return 0
         if args.command == "daemon":
             runtime.run_forever(poll_seconds=args.poll_seconds)

@@ -2602,26 +2602,175 @@ class Store:
         ).fetchone()
         return int(row["n"])
 
+    def is_private_empathy_state(self) -> bool:
+        """Only explicit fresh-state initialization creates this marker."""
+        marker = self.connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type='table' AND name='empathy_private_state'
+            """
+        ).fetchone()
+        if marker is None:
+            return False
+        row = self.connection.execute(
+            "SELECT 1 FROM empathy_private_state WHERE mode='RESPONSE_ONLY_V1'"
+        ).fetchone()
+        return row is not None
+
+    def initialize_private_empathy_state(self, *, now: float) -> None:
+        """Seal a new empty DB against generic (including old-code) claims.
+
+        The CLI additionally requires a nonexisting explicit state filename.
+        The trigger lives only in this private DB and is never installed into
+        an existing production/shared state database.
+        """
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            if self.is_private_empathy_state():
+                raise ValueError("Empathy private state is already initialized")
+            for table in ("runs", "events", "schedules", "memories"):
+                count = self.connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0]
+                if count:
+                    raise ValueError("Empathy private state must be a fresh empty database")
+            self.connection.execute(
+                """
+                CREATE TABLE empathy_private_state (
+                    mode TEXT PRIMARY KEY,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                INSERT INTO empathy_private_state (mode, created_at)
+                VALUES ('RESPONSE_ONLY_V1', ?)
+                """, (now,)
+            )
+            self.connection.execute(
+                """
+                CREATE TABLE empathy_response_claims (
+                    event_id TEXT PRIMARY KEY REFERENCES events(id),
+                    run_id TEXT NOT NULL,
+                    bound_worker_id TEXT NOT NULL,
+                    admitted_at REAL NOT NULL
+                )
+                """
+            )
+            # A legacy worker unaware of Empathy cannot claim any event in
+            # this DB, including a lease-expired exact response step.
+            self.connection.execute(
+                """
+                CREATE TRIGGER empathy_private_claim_gate
+                BEFORE UPDATE OF status ON events
+                WHEN NEW.status='CLAIMED' AND NOT EXISTS (
+                    SELECT 1 FROM empathy_response_claims
+                    WHERE event_id=NEW.id AND bound_worker_id=NEW.lease_owner
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'private Empathy state blocks generic claim');
+                END
+                """
+            )
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+
     def claim_event(
-        self, *, worker_id: str, now: float, lease_seconds: float
+        self, *, worker_id: str, now: float, lease_seconds: float,
+        exact_response_run_id: str | None = None,
     ) -> Event | None:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be > 0")
         self.connection.execute("BEGIN IMMEDIATE")
         try:
-            row = self.connection.execute(
-                """
-                SELECT * FROM events
-                WHERE available_at <= ?
-                  AND (
-                    status = 'PENDING'
-                    OR (status = 'CLAIMED' AND lease_until IS NOT NULL AND lease_until <= ?)
-                  )
-                ORDER BY priority DESC, created_at ASC
-                LIMIT 1
-                """,
-                (now, now),
-            ).fetchone()
+            if exact_response_run_id is None:
+                if self.is_private_empathy_state():
+                    raise ValueError("private Empathy state requires exact response claim")
+                row = self.connection.execute(
+                    """
+                    SELECT * FROM events
+                    WHERE available_at <= ?
+                      AND (
+                        status = 'PENDING'
+                        OR (status = 'CLAIMED' AND lease_until IS NOT NULL AND lease_until <= ?)
+                      )
+                    ORDER BY priority DESC, created_at ASC
+                    LIMIT 1
+                    """,
+                    (now, now),
+                ).fetchone()
+            else:
+                if not self.is_private_empathy_state():
+                    raise ValueError("exact Empathy response requires isolated state database")
+                # Require an actual selected run before examining whether the
+                # private store was mixed with unrelated work.
+                run = self.connection.execute(
+                    """
+                    SELECT status, capabilities_json, step_count, control_action,
+                           contract_version
+                    FROM runs WHERE id=?
+                    """, (exact_response_run_id,)
+                ).fetchone()
+                if run is None:
+                    raise ValueError("exact Empathy response run does not exist")
+                # A private response database is single-purpose. Reject a
+                # reused/mixed store instead of silently selecting one task.
+                if (
+                    self.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] != 1
+                    or self.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] != 1
+                    or self.connection.execute("SELECT COUNT(*) FROM schedules").fetchone()[0]
+                    or self.connection.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+                ):
+                    raise ValueError("private Empathy state contains unrelated work")
+                # The dedicated Empathy carrier must never work the ordinary
+                # shared queue. Under one write transaction, validate the
+                # exact no-capability run and claim only its fresh step event.
+                if json.loads(run["capabilities_json"]):
+                    raise ValueError("exact Empathy response run has capabilities")
+                if run["status"] != "RUNNING" or run["control_action"] is not None:
+                    raise ValueError("exact Empathy response run is not ready")
+                if int(run["contract_version"]) != RUN_CONTRACT_VERSION:
+                    raise ValueError("exact Empathy response contract is not current")
+                if int(run["step_count"]) != 0:
+                    raise ValueError("exact Empathy response is not an initial step")
+                row = self.connection.execute(
+                    """
+                    SELECT * FROM events
+                    WHERE dedup_key=? AND kind='run.step'
+                      AND status='PENDING' AND attempts=0
+                      AND available_at <= ?
+                    """,
+                    (
+                        f"run-step:{exact_response_run_id}:{int(run['step_count'])}",
+                        now,
+                    ),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("exact Empathy response step is absent, stale, or claimed")
+                payload = json.loads(row["payload_json"])
+                if (
+                    payload.get("run_id") != exact_response_run_id
+                    or type(payload.get("step")) is not int
+                    or payload["step"] != int(run["step_count"])
+                    or set(payload) != {"run_id", "step"}
+                ):
+                    raise ValueError("exact Empathy response event is not a fresh user step")
+                if self.connection.execute(
+                    "SELECT 1 FROM empathy_response_claims WHERE event_id=?",
+                    (row["id"],),
+                ).fetchone() is not None:
+                    raise ValueError("exact Empathy response event already admitted")
+                self.connection.execute(
+                    """
+                    INSERT INTO empathy_response_claims
+                    (event_id, run_id, bound_worker_id, admitted_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (row["id"], exact_response_run_id, worker_id, now),
+                )
             if row is None:
                 self.connection.execute("COMMIT")
                 return None

@@ -1,8 +1,14 @@
 import json
 from pathlib import Path
+import pytest
 
 from pre_active.cli import build_parser, main
+from pre_active.cli import _runtime
+from pre_active.context import ContextAssembler
+from pre_active.empathy_policy import EmpathyAdvisory
+from pre_active.engine import Engine, ModelResponse
 from pre_active.store import Store
+from pre_active.tools import ToolRegistry
 
 
 def test_cli_submit_creates_durable_run_and_event(tmp_path: Path, capsys) -> None:
@@ -45,6 +51,97 @@ def test_runtime_cli_exposes_event_attempt_ceiling() -> None:
     ])
 
     assert args.max_event_attempts == 20
+
+
+def test_run_once_exposes_exact_operator_admitted_empathy_policy(tmp_path: Path):
+    args = build_parser().parse_args([
+        "run-once", "--base-url", "http://127.0.0.1:1/v1",
+        "--model", "test-model", "--empathy-run-id", "exact-run",
+        "--empathy-policy", "STOP_PLAY", "--empathy-focus-needed",
+    ])
+    store = Store(tmp_path / "state.db")
+    runtime = _runtime(args, store)
+    engine = runtime.engine
+    assert engine.empathy_response_only is True
+    assert engine.empathy_response_run_id == "exact-run"
+    assert engine.empathy_adviser("wrong-run") is None
+    accepted = engine.empathy_adviser("exact-run")
+    assert accepted.policy == "STOP_PLAY"
+    assert accepted.focus_needed is True
+
+
+def test_run_once_rejects_incomplete_advisory_binding(tmp_path: Path):
+    args = build_parser().parse_args([
+        "run-once", "--base-url", "http://127.0.0.1:1/v1",
+        "--model", "test-model", "--empathy-policy", "STOP_PLAY",
+    ])
+    with pytest.raises(SystemExit, match="must be supplied together"):
+        _runtime(args, Store(tmp_path / "state.db"))
+
+
+def test_cli_bound_empathy_run_skips_scheduler_and_foreign_queue(
+    tmp_path: Path, monkeypatch, capsys
+):
+    import pre_active.cli as cli_module
+    state = tmp_path / "state.db"
+    preflight = Store(state)
+    preflight.initialize_private_empathy_state(now=0.1)
+    selected_id = preflight.create_run_with_initial_step(
+        task="Response only", capabilities=set(), now=1.0
+    )
+    preflight.close()
+    calls = []
+
+    class Model:
+        def respond(self, *, messages, tools):
+            calls.append((messages, tools))
+            return ModelResponse(final_text="response")
+
+    class IsolatedRuntime:
+        def __init__(self, args, store):
+            self.engine = Engine(
+                store=store, model=Model(), tools=ToolRegistry(store),
+                context=ContextAssembler(store, max_chars=4000),
+                system_prompt="Answer.", worker_id="one-bound-test",
+                empathy_adviser=lambda rid: (
+                    EmpathyAdvisory(args.empathy_policy, False)
+                    if rid == args.empathy_run_id else None
+                ),
+                empathy_response_only=True,
+                empathy_response_run_id=args.empathy_run_id,
+            )
+
+        def cycle(self, *, now):
+            raise AssertionError("bound run must never tick scheduler/observers")
+
+    monkeypatch.setattr(cli_module, "_runtime", IsolatedRuntime)
+    assert main([
+        "--state", str(state), "run-once",
+        "--empathy-run-id", selected_id,
+        "--empathy-policy", "TASK_DIRECT",
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["run_id"] == selected_id
+    assert result["schedule_events"] == result["observer_events"] == 0
+    reopened = Store(state)
+    assert reopened.get_run(selected_id)["status"] == "COMPLETED"
+    assert "TASK_DIRECT" in calls[0][0][0]["content"]
+    assert calls[0][1] == []
+    reopened.close()
+
+
+def test_empathy_init_creates_only_fresh_private_state(tmp_path: Path, capsys):
+    state = tmp_path / "response-only-state.db"
+    assert main(["--state", str(state), "empathy-init"]) == 0
+    details = json.loads(capsys.readouterr().out)
+    assert details["mode"] == "RESPONSE_ONLY_V1"
+    store = Store(state)
+    assert store.is_private_empathy_state()
+    store.close()
+    with pytest.raises(SystemExit, match="new absolute"):
+        main(["--state", str(state), "empathy-init"])
+    with pytest.raises(SystemExit, match="new absolute"):
+        main(["--state", ".pre-active/state.db", "empathy-init"])
 
 
 def test_status_reports_dead_lettered_event_count(tmp_path: Path, capsys) -> None:

@@ -162,6 +162,7 @@ class Engine:
         max_consecutive_endogenous_turns: int = 2,
         empathy_adviser: EmpathyAdviser | None = None,
         empathy_response_only: bool = False,
+        empathy_response_run_id: str | None = None,
         runtime_contract_version: int = RUN_CONTRACT_VERSION,
     ) -> None:
         self.store = store
@@ -178,7 +179,14 @@ class Engine:
         self.empathy_adviser = empathy_adviser
         if type(empathy_response_only) is not bool:
             raise TypeError("empathy_response_only must be a boolean")
+        if empathy_response_run_id is not None and (
+            type(empathy_response_run_id) is not str
+            or not empathy_response_run_id.strip()
+            or not empathy_response_only
+        ):
+            raise ValueError("a bound Empathy run requires explicit response-only mode")
         self.empathy_response_only = empathy_response_only
+        self.empathy_response_run_id = empathy_response_run_id
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
         self.lease_heartbeat_seconds = lease_heartbeat_seconds
@@ -269,6 +277,8 @@ class Engine:
         # advice whenever autonomous re-entry is currently available.
         if (
             self.empathy_response_only
+            and (self.empathy_response_run_id is None
+                 or run["id"] == self.empathy_response_run_id)
             and self.empathy_adviser is not None
             and not run["capabilities"]
             and not allow_autonomous_reentry
@@ -359,11 +369,19 @@ class Engine:
 
         self.store.resume_run_after_effect(run_id=run_id, now=now, priority=0)
 
-    def run_once(self, *, now: float) -> str | None:
+    def run_once(
+        self, *, now: float, exact_response_run_id: str | None = None
+    ) -> str | None:
+        if exact_response_run_id is not None and (
+            not self.empathy_response_only
+            or self.empathy_response_run_id != exact_response_run_id
+        ):
+            raise ValueError("exact response claim requires matching bound Empathy mode")
         event = self.store.claim_event(
             worker_id=self.worker_id,
             now=now,
             lease_seconds=self.lease_seconds,
+            exact_response_run_id=exact_response_run_id,
         )
         if event is None:
             return None
@@ -663,7 +681,12 @@ class Engine:
             # request_turn tool too. Without this, a zero-capability run can
             # still autonomously schedule another model turn after seeing
             # person-specific advice. Default mode is unchanged.
-            if self.empathy_response_only and not run["capabilities"]:
+            if (
+                self.empathy_response_only
+                and (self.empathy_response_run_id is None
+                     or run["id"] == self.empathy_response_run_id)
+                and not run["capabilities"]
+            ):
                 allow_autonomous_reentry = False
             stored_decision = self.store.get_run_step_decision(
                 run_id=run_id, step=run["step_count"]
