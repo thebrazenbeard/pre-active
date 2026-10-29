@@ -107,6 +107,101 @@ def test_ambiguous_mutation_must_be_reconciled_before_retry(tmp_path: Path) -> N
     assert attempts == 2
 
 
+def test_reconciliation_requires_actual_boolean_effect_evidence(tmp_path: Path) -> None:
+    import pytest
+
+    store = Store(tmp_path / "state.db")
+    registry = ToolRegistry(store)
+    registry.register(
+        ToolSpec(
+            name="record.write",
+            description="ambiguous test mutation",
+            input_schema={"type": "object", "required": ["value"]},
+            capability="record.write",
+            mutation=True,
+        ),
+        lambda _args: (_ for _ in ()).throw(RuntimeError("unknown effect")),
+    )
+    with pytest.raises(RuntimeError, match="unknown effect"):
+        registry.execute(
+            name="record.write", arguments={"value": 7},
+            request_id="req-typed-reconcile",
+            allowed_capabilities={"record.write"}, now=1.0,
+        )
+
+    for forged in (0, 1, 2, "false", None):
+        with pytest.raises(ValueError, match="effect_occurred must be a boolean"):
+            registry.reconcile(
+                request_id="req-typed-reconcile",
+                effect_occurred=forged,
+                evidence_digest="a" * 64,
+                now=2.0,
+                result={"written": 7},
+            )
+        assert registry.effect_state("req-typed-reconcile") == "ATTEMPTED_UNKNOWN"
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM tool_reconciliations WHERE request_id = ?",
+            ("req-typed-reconcile",),
+        ).fetchone()[0] == 0
+
+    registry.reconcile(
+        request_id="req-typed-reconcile",
+        effect_occurred=True,
+        evidence_digest="a" * 64,
+        now=3.0,
+        result={"written": 7},
+    )
+    assert registry.effect_state("req-typed-reconcile") == "COMMITTED"
+
+
+def test_reconciliation_requires_actual_boolean_quiescence_evidence(tmp_path: Path) -> None:
+    import pytest
+
+    store = Store(tmp_path / "state.db")
+    registry = ToolRegistry(store)
+    store.connection.execute(
+        """
+        INSERT INTO tool_effects (
+            request_id, tool_name, request_sha256, request_json, state,
+            result_json, result_sha256, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'EXECUTING', NULL, NULL, ?, ?)
+        """,
+        ("executing-quiescence", "record.write", "a" * 64, "{}", 1.0, 1.0),
+    )
+
+    for forged in (0, 1, 2, "true", None):
+        with pytest.raises(ValueError, match="attempt_quiesced must be a boolean"):
+            registry.reconcile(
+                request_id="executing-quiescence",
+                effect_occurred=False,
+                evidence_digest="b" * 64,
+                now=2.0,
+                attempt_quiesced=forged,
+            )
+        assert registry.effect_state("executing-quiescence") == "EXECUTING"
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM tool_reconciliations WHERE request_id = ?",
+            ("executing-quiescence",),
+        ).fetchone()[0] == 0
+
+    with pytest.raises(ValueError, match="quiesced"):
+        registry.reconcile(
+            request_id="executing-quiescence",
+            effect_occurred=False,
+            evidence_digest="b" * 64,
+            now=3.0,
+            attempt_quiesced=False,
+        )
+    registry.reconcile(
+        request_id="executing-quiescence",
+        effect_occurred=False,
+        evidence_digest="b" * 64,
+        now=4.0,
+        attempt_quiesced=True,
+    )
+    assert registry.effect_state("executing-quiescence") == "RECONCILED_NO_EFFECT"
+
+
 def test_tool_arguments_are_validated_against_json_schema_before_handler(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     registry = ToolRegistry(store)
