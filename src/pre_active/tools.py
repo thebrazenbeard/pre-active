@@ -509,6 +509,10 @@ class ToolRegistry:
         result: dict[str, Any] | None = None,
         attempt_quiesced: bool = False,
     ) -> None:
+        if type(effect_occurred) is not bool:
+            raise ValueError("effect_occurred must be a boolean")
+        if type(attempt_quiesced) is not bool:
+            raise ValueError("attempt_quiesced must be a boolean")
         if len(evidence_digest) != 64 or any(
             ch not in "0123456789abcdefABCDEF" for ch in evidence_digest
         ):
