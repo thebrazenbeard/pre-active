@@ -22,6 +22,18 @@ Pre-Active still preserves the harder effect boundary: events and autonomous tur
 
 See [docs/AUTONOMOUS_RUNTIME.md](docs/AUTONOMOUS_RUNTIME.md) for the autonomous-turn contract and Observer/Initiator/Critic model.
 
+## Product at a glance
+
+| Surface | Supported scope |
+| --- | --- |
+| Durable work | SQLite-backed tasks, runs, scheduling, event leases, retry/dead-letter handling and recovery |
+| Cognition | Host-owned turns through a configured loopback, OpenAI-compatible model endpoint; idle time does not consume inference |
+| Extensibility | Python `ToolRegistry` handlers, explicit named capabilities, bounded context and opt-in observation/Volition/other adapters |
+| Effects | Fenced request ledger, idempotent replay of known commits, and `BLOCKED_EFFECT` pending independent reconciliation |
+| Deployment | Library and CLI that a host must start and configure; no hosted agent service or blanket effect authorization is supplied |
+
+**Who it's for:** developers integrating a resident, event-driven agent loop into an application they administer. A reusable host must supply the model process, trusted observation sources, actual tool handlers, credential handling and the independent verifier for consequential effects. None is inferred from the presence of a README or a queued task.
+
 ## What V1 provides
 
 - SQLite/WAL durable state with a lease-based event queue.
@@ -41,7 +53,7 @@ See [docs/AUTONOMOUS_RUNTIME.md](docs/AUTONOMOUS_RUNTIME.md) for the autonomous-
 - Per-step durable model-decision fencing before any tool dispatch.
 - Salience/relevance-based memory selection under a bounded context budget.
 - A provider-neutral model interface plus a minimal OpenAI-compatible adapter.
-- Durable named local-model targets: the user selects which loopback OpenAI-compatible endpoint/model Pre-Active treats as its active cognitive target, without coupling the runtime to Qwen or any other specific model host.
+- Durable named local-model targets: the user selects which loopback OpenAI-compatible endpoint/model Pre-Active treats as its active cognitive target, without coupling the runtime to any particular model host.
 - Typed provider failure semantics: known transient transport/HTTP failures retry with bounded backoff, stable jitter, and `Retry-After` support; known permanent client/protocol failures fail fast instead of burning the queue retry budget.
 - Structured tool admission by explicit capability and a fail-closed JSON-Schema-compatible validation subset.
 - Exactly one admitted tool call per model turn for deterministic effect ordering.
@@ -211,9 +223,10 @@ Submit a durable task:
 
 ```bash
 pre-active --state .pre-active/state.db submit \
-  "Summarize the queued work" \
-  --capability files.read
+  "Write a short greeting"
 ```
+
+This command **queues a durable, zero-tool-capability task**; it does not contact a model or execute a tool. The CLI does not register a `files.read` or shell handler by default. A host must register each concrete tool through `ToolRegistry` and independently authorize its effect; `--capability` only narrows what a run may ask for, and does not create a handler or grant access.
 
 Run one cycle against an OpenAI-compatible chat-completions endpoint:
 
