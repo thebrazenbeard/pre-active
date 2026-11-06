@@ -72,7 +72,12 @@ number, source credentials or private data is recorded by this contract.
 
 - Exact input schema; no `effect_authority`, `granted_approvals`, or `dispatch_task`
   values can be smuggled through an extra plan key.
+- Treat frozen dataclasses as untrusted at the API boundary: recopy every
+  `GoalObservationLink` primitive into a newly validated exact class, rejecting
+  forged post-init bypasses before any SQLite transaction.
 - Bounded opaque IDs; zero-dollar declared route cost only.
+- A selected `AVAILABLE`/`NEEDS_APPROVAL` route must explicitly declare zero
+  cost; unknown cost is not silently treated as free. Negative timestamps fail.
 - `AVAILABLE` leaves `permission_authenticated=false`, `may_execute=false`,
   `verified_result=false`, `effect_authority=NONE`.
 - `INCOMPLETE_UNKNOWN` is retained; bounded search exhaustion is not `NO_ROUTE`.
@@ -99,7 +104,7 @@ PYTHONPATH=src python -B -m unittest discover -s tests \
   -p 'test_opportunity_advisory.py' -v
 ```
 
-**Observed locally:** 14 synthetic Python tests passed (including actual
+**Observed locally:** 18 synthetic Python tests passed (including actual
 in-memory and reopened disk-backed Pre-Active Store journal writes, dedup, conflict, and no queue/run
 creation), 2026-11-06. These are SOURCE/TEST, not a real host adapter or
 external verifier. No host service activation, native Project install,
