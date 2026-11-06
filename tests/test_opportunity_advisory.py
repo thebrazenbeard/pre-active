@@ -85,6 +85,34 @@ class AdvisoryContractTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 replace(LINK, **change)
 
+    def test_rejects_forged_dataclass_without_post_init(self):
+        for name, value in [("goal_revision", True),
+                            ("goal_id", "forged person target with spaces"),
+                            ("observation_sha256", "bad"),
+                            ("planner_head", "forged")]:
+            forged = object.__new__(GoalObservationLink)
+            for field in ("goal_id", "goal_revision", "observation_event_id",
+                          "observation_sha256", "planner_head"):
+                object.__setattr__(forged, field, getattr(LINK, field))
+            object.__setattr__(forged, name, value)
+            with self.subTest(field=name), self.assertRaises(ValueError):
+                build_route_advisory(forged, plan())
+
+    def test_available_without_zero_cost_is_unknown_not_free(self):
+        with self.assertRaises(ValueError):
+            build_route_advisory(LINK, plan(total_cost=None))
+        with self.assertRaises(ValueError):
+            build_route_advisory(
+                LINK, plan(status="NEEDS_APPROVAL", missing_approvals=["owner"], total_cost=None))
+
+    def test_rejects_forged_subclass(self):
+        class FakeLink(GoalObservationLink):
+            pass
+
+        with self.assertRaises(TypeError):
+            build_route_advisory(
+                FakeLink("goal1", 1, "obs1", "a" * 64, PLANNER_HEAD), plan())
+
 
 class AdvisoryLedgerTests(unittest.TestCase):
     def setUp(self):
@@ -126,9 +154,23 @@ class AdvisoryLedgerTests(unittest.TestCase):
         self.assertFalse(self.store.connection.in_transaction)
         self.assertEqual(len(self.store.list_journal(subject_id="proposal_1")), 0)
 
+    def test_forged_link_cannot_reach_any_journal(self):
+        forged = object.__new__(GoalObservationLink)
+        for field in ("goal_id", "goal_revision", "observation_event_id",
+                      "observation_sha256", "planner_head"):
+            object.__setattr__(forged, field, getattr(LINK, field))
+        object.__setattr__(forged, "observation_sha256", "forged")
+        with self.assertRaises(ValueError):
+            self.ledger.record(
+                proposal_id="forged_p1", link=forged, route_plan=plan(), now=5.0)
+        self.assertEqual(len(self.store.list_journal(subject_id="forged_p1")), 0)
+        self.assertEqual(self.store.connection.execute(
+            "SELECT COUNT(*) FROM opportunity_advisories").fetchone()[0], 0)
+
     def test_invalid_clock_and_proposal_id(self):
         for proposal_id, now in [("bad id", 0.0), ("good", float("nan")),
-                                 ("good", True), ("good", 10**1000)]:
+                                 ("good", True), ("good", 10**1000),
+                                 ("good", -1.0)]:
             with self.subTest(proposal_id=proposal_id, now=now), self.assertRaises(ValueError):
                 self.ledger.record(proposal_id=proposal_id, link=LINK, route_plan=plan(), now=now)
 

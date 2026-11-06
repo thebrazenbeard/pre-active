@@ -77,8 +77,19 @@ def build_route_advisory(link: GoalObservationLink, plan: Mapping[str, Any]) -> 
     A SHA-256 here binds JSON bytes; it is not a signature or source attestation.
     The route plan is expected to match Lou-pole PR#13's ``to_dict`` schema.
     """
-    if not isinstance(link, GoalObservationLink) or type(plan) is not dict:
+    if type(link) is not GoalObservationLink or type(plan) is not dict:
         raise TypeError("typed link and plain route-plan dict required")
+    # Frozen/slots are convenience, not a trust boundary: object.__new__ plus
+    # object.__setattr__ can bypass dataclass __post_init__ and forge fields.
+    # Copy the five primitive values into a newly validated exact class and
+    # serialize only that snapshot, never the potentially forged original.
+    try:
+        checked = GoalObservationLink(
+            link.goal_id, link.goal_revision, link.observation_event_id,
+            link.observation_sha256, link.planner_head,
+        )
+    except AttributeError as exc:
+        raise ValueError("incomplete goal-observation link") from exc
     if set(plan) != _PLAN_FIELDS:
         raise ValueError("route plan requires exact keys; no effect/grant smuggling")
     status = plan["status"]
@@ -104,6 +115,8 @@ def build_route_advisory(link: GoalObservationLink, plan: Mapping[str, Any]) -> 
     cost = plan["total_cost"]
     if cost is not None and (isinstance(cost, bool) or not isinstance(cost, int) or cost != 0):
         raise ValueError("zero-budget advice requires declared cost zero or null")
+    if status in {"AVAILABLE", "NEEDS_APPROVAL"} and cost is None:
+        raise ValueError("selected route requires explicit declared zero cost")
     if (status == "AVAILABLE" and approvals) or (status == "NEEDS_APPROVAL" and not approvals):
         raise ValueError("route status and pending approvals disagree")
     if status == "NO_ROUTE" and actions:
@@ -112,10 +125,10 @@ def build_route_advisory(link: GoalObservationLink, plan: Mapping[str, Any]) -> 
     result: dict[str, Any] = {
         "schema": "PRE_ACTIVE_OPPORTUNITY_ADVISORY_V1",
         "source": "UNTRUSTED_CALLER_PLAN",
-        "goal_claim": {"id": link.goal_id, "revision": link.goal_revision},
-        "observation_claim": {"event_id": link.observation_event_id,
-                              "sha256": link.observation_sha256, "admission": "UNVERIFIED"},
-        "planner_source_head_claim": link.planner_head,
+        "goal_claim": {"id": checked.goal_id, "revision": checked.goal_revision},
+        "observation_claim": {"event_id": checked.observation_event_id,
+                              "sha256": checked.observation_sha256, "admission": "UNVERIFIED"},
+        "planner_source_head_claim": checked.planner_head,
         "route": {"status": status, "action_ids": list(actions),
                   "missing_approvals": list(approvals), "blockers": list(blockers),
                   "declared_cost": cost, "explored_states": explored},
@@ -153,7 +166,7 @@ class OpportunityAdvisoryLedger:
             finite_now = float(now)
         except OverflowError as exc:
             raise ValueError("now must be finite") from exc
-        if not math.isfinite(finite_now):
+        if not math.isfinite(finite_now) or finite_now < 0:
             raise ValueError("now must be finite")
         receipt = build_route_advisory(link, route_plan)
         canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
