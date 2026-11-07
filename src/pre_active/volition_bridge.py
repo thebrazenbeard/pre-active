@@ -386,13 +386,102 @@ class VolitionBridge:
         if "observation_context" in payload:
             normalized["observation_context"] = self._observation_context(payload)
         normalized["effect_authority"] = False
-        return self.store.enqueue_event(
+        context = normalized.get("observation_context")
+        opportunity_binding: tuple[str, str] | None = None
+        if context is not None and context["observer_kind"] == "authenticated_opportunity":
+            # Shape-valid metadata is NOT source authentication. Require the
+            # host admission receipt committed by the observer in this same
+            # transaction. A direct caller cannot relabel a diagnostic sample.
+            if not self.store.connection.in_transaction:
+                raise InvalidVolitionSignal("authenticated opportunity requires atomic admission")
+            expected_source = f"observer:{context['observer_id']}"
+            if normalized["source"] != expected_source:
+                raise InvalidVolitionSignal("authenticated opportunity observer source mismatch")
+            observer = self.store.connection.execute(
+                "SELECT o.kind, o.config_json, o.last_digest, o.change_count, "
+                "d.route_kind, d.config_json AS dispatch_config_json, "
+                "i.policy_kind, i.last_decision_json FROM observers AS o "
+                "JOIN observer_dispatch AS d ON d.observer_id=o.id "
+                "JOIN observer_initiative AS i ON i.observer_id=o.id "
+                "WHERE o.id=?", (context["observer_id"],),
+            ).fetchone()
+            if observer is None or observer["kind"] != "authenticated_opportunity" or observer["route_kind"] != "volition_signal":
+                raise InvalidVolitionSignal("authenticated opportunity observer binding absent")
+            config = json.loads(observer["config_json"])
+            evidence = context["evidence"]
+            # Bind *every* sanitized claim field, not merely a caller's
+            # digest string: otherwise callers could replay a real receipt
+            # while substituting misleading goal/artifact/time metadata.
+            canonical_claim = json.dumps(
+                evidence, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
+            if hashlib.sha256(canonical_claim).hexdigest() != context["digest"]:
+                raise InvalidVolitionSignal("authenticated opportunity claim digest mismatch")
+            if (
+                config != {"source_id": evidence["source_id"], "goal_id": evidence["goal_id"]}
+                or normalized["target"] != evidence["goal_id"]
+            ):
+                raise InvalidVolitionSignal("authenticated opportunity source/goal binding changed")
+            # Authentication is not dispatch authority. A sampled/baselined
+            # event may have a valid receipt but no initiative authorization.
+            # The actual observer updates these fields before enqueue *inside*
+            # the same transaction. Requiring that state blocks direct calls
+            # that try to turn suppressed diagnostics into motive signals.
+            decision_json = observer["last_decision_json"]
+            decision = json.loads(decision_json) if decision_json is not None else None
+            if (
+                not isinstance(decision, dict)
+                or decision.get("emit") is not True
+                or observer["last_digest"] != context["digest"]
+                or int(observer["change_count"]) != context["change_count"]
+                or decision.get("reason") != context["initiative"]["reason"]
+                or observer["policy_kind"] != context["initiative"]["policy_kind"]
+                or decision.get("metrics") != context["initiative"]["metrics"]
+            ):
+                raise InvalidVolitionSignal("authenticated opportunity lacks current emitter decision")
+            expected_dispatch = json.loads(observer["dispatch_config_json"])
+            sent_dispatch = {
+                key: value for key, value in normalized.items()
+                if key not in {"source", "effect_authority", "observation_context"}
+            }
+            if sent_dispatch != expected_dispatch:
+                raise InvalidVolitionSignal("authenticated opportunity dispatch config differs")
+            receipt_table = self.store.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='authenticated_opportunity_receipts'"
+            ).fetchone()
+            if receipt_table is None:
+                raise InvalidVolitionSignal("authenticated opportunity receipt table absent")
+            receipt = self.store.connection.execute(
+                "SELECT claim_sha256, signal_event_id FROM authenticated_opportunity_receipts "
+                "WHERE source_id=? AND opportunity_id=?",
+                (evidence["source_id"], evidence["opportunity_id"]),
+            ).fetchone()
+            if receipt is None or receipt["claim_sha256"] != context["digest"]:
+                raise InvalidVolitionSignal("authenticated opportunity receipt missing or inconsistent")
+            if receipt["signal_event_id"] is not None:
+                raise InvalidVolitionSignal("authenticated opportunity already dispatched")
+            # One stable source event is allowed only one signal, even when a
+            # direct caller supplies a different dedup_key or another observer
+            # samples the same event.
+            dedup_key = f"authenticated-opportunity:{evidence['source_id']}:{evidence['opportunity_id']}"
+            opportunity_binding = (evidence["source_id"], evidence["opportunity_id"])
+        event_id = self.store.enqueue_event(
             kind="volition.signal",
             payload=normalized,
             priority=0,
             dedup_key=dedup_key,
             now=now,
         )
+        if opportunity_binding is not None:
+            cursor = self.store.connection.execute(
+                "UPDATE authenticated_opportunity_receipts SET signal_event_id=? "
+                "WHERE source_id=? AND opportunity_id=? AND signal_event_id IS NULL",
+                (event_id, *opportunity_binding),
+            )
+            if cursor.rowcount != 1:
+                raise InvalidVolitionSignal("authenticated opportunity dispatch receipt race")
+        return event_id
 
     def enqueue_meso_intent(
         self,
@@ -577,7 +666,7 @@ class VolitionBridge:
             )
         if _SHA256.fullmatch(raw["digest"].strip()) is None:
             raise InvalidVolitionSignal("observation context digest must be sha256")
-        if raw["observer_kind"].strip() != "file":
+        if raw["observer_kind"].strip() not in {"file", "authenticated_opportunity"}:
             raise InvalidVolitionSignal("observation context observer_kind unsupported")
         change_count = raw["change_count"]
         if (
@@ -592,31 +681,66 @@ class VolitionBridge:
         evidence = raw["evidence"]
         if not isinstance(evidence, dict):
             raise InvalidVolitionSignal("observation context evidence must be an object")
-        if len(evidence) > len(_FILE_EVIDENCE_FIELDS) or set(evidence) - _FILE_EVIDENCE_FIELDS:
-            raise InvalidVolitionSignal("observation context evidence has unsupported fields")
-        if type(evidence.get("exists")) is not bool:
-            raise InvalidVolitionSignal("observation context evidence exists must be boolean")
-        safe_evidence: dict[str, Any] = {"exists": evidence["exists"]}
-        if "path" in evidence:
-            path = evidence["path"]
-            if not isinstance(path, str) or len(path) > MAX_OBSERVATION_PATH_CHARS:
-                raise InvalidVolitionSignal("observation context evidence path is invalid")
-            # Full paths are private host metadata, not cognition input.
-        for key in ("size", "mtime_ns"):
-            if key in evidence:
+        is_opportunity = raw["observer_kind"].strip() == "authenticated_opportunity"
+        if is_opportunity:
+            # Only the pinned-host adapter can admit this observer kind. The
+            # Volition envelope itself is sanitized metadata, not a verifier.
+            required_evidence = {
+                "source_id", "opportunity_id", "goal_id", "goal_revision",
+                "issued_at", "expires_at", "artifact_sha256",
+            }
+            if set(evidence) != required_evidence:
+                raise InvalidVolitionSignal("opportunity evidence has missing or unsupported fields")
+            safe_evidence = {}
+            for key in ("source_id", "opportunity_id", "goal_id"):
+                if not isinstance(evidence[key], str) or _OPAQUE_ID.fullmatch(evidence[key]) is None:
+                    raise InvalidVolitionSignal(f"opportunity {key} must be opaque")
+                safe_evidence[key] = evidence[key]
+            revision = evidence["goal_revision"]
+            if type(revision) is not int or not 0 <= revision <= MAX_OBSERVATION_CHANGE_COUNT:
+                raise InvalidVolitionSignal("opportunity goal_revision must be bounded integer")
+            safe_evidence["goal_revision"] = revision
+            for key in ("issued_at", "expires_at"):
                 value = evidence[key]
-                if type(value) is not int or not (0 <= value <= MAX_FILE_SIZE_BYTES):
-                    raise InvalidVolitionSignal(
-                        f"observation context evidence {key} must be bounded nonnegative integer"
-                    )
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                    raise InvalidVolitionSignal(f"opportunity {key} must be finite")
+                # Exact JSON numeric representation is part of the signed
+                # digest; do not silently coerce integer epochs to floats.
                 safe_evidence[key] = value
-        if "sha256" in evidence:
-            digest = evidence["sha256"]
-            if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
-                raise InvalidVolitionSignal("observation context evidence sha256 must be a digest")
-            safe_evidence["sha256"] = digest.lower()
-        if safe_evidence["exists"] is False and len(safe_evidence) != 1:
-            raise InvalidVolitionSignal("observation context absent-file evidence is inconsistent")
+            if evidence["expires_at"] <= evidence["issued_at"]:
+                raise InvalidVolitionSignal("opportunity timing is inconsistent")
+            for key in ("artifact_sha256",):
+                value = evidence[key]
+                if not isinstance(value, str) or _SHA256.fullmatch(value) is None or value != value.lower():
+                    raise InvalidVolitionSignal(f"opportunity {key} must be lowercase sha256")
+            safe_evidence["artifact_sha256"] = evidence["artifact_sha256"]
+            # The authentication tag is verified and discarded before storage.
+        else:
+            if len(evidence) > len(_FILE_EVIDENCE_FIELDS) or set(evidence) - _FILE_EVIDENCE_FIELDS:
+                raise InvalidVolitionSignal("observation context evidence has unsupported fields")
+            if type(evidence.get("exists")) is not bool:
+                raise InvalidVolitionSignal("observation context evidence exists must be boolean")
+            safe_evidence = {"exists": evidence["exists"]}
+            if "path" in evidence:
+                path = evidence["path"]
+                if not isinstance(path, str) or len(path) > MAX_OBSERVATION_PATH_CHARS:
+                    raise InvalidVolitionSignal("observation context evidence path is invalid")
+                # Full paths are private host metadata, not cognition input.
+            for key in ("size", "mtime_ns"):
+                if key in evidence:
+                    value = evidence[key]
+                    if type(value) is not int or not (0 <= value <= MAX_FILE_SIZE_BYTES):
+                        raise InvalidVolitionSignal(
+                            f"observation context evidence {key} must be bounded nonnegative integer"
+                        )
+                    safe_evidence[key] = value
+            if "sha256" in evidence:
+                digest = evidence["sha256"]
+                if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+                    raise InvalidVolitionSignal("observation context evidence sha256 must be a digest")
+                safe_evidence["sha256"] = digest.lower()
+            if safe_evidence["exists"] is False and len(safe_evidence) != 1:
+                raise InvalidVolitionSignal("observation context absent-file evidence is inconsistent")
         initiative = raw["initiative"]
         if not isinstance(initiative, dict) or set(initiative) != {
             "policy_kind",
@@ -667,9 +791,12 @@ class VolitionBridge:
             # User-chosen labels and free-form summaries may contain paths,
             # credentials or instructions. Preserve stable provenance instead.
             "observer_name": "observer-redacted",
-            "observer_kind": "file",
+            "observer_kind": "authenticated_opportunity" if is_opportunity else "file",
             "digest": raw["digest"].strip(),
-            "summary": "file observed present" if safe_evidence["exists"] else "file observed absent",
+            "summary": (
+                "authenticated opportunity observed" if is_opportunity else
+                "file observed present" if safe_evidence["exists"] else "file observed absent"
+            ),
             "change_count": int(change_count),
             "evidence": safe_evidence,
             "initiative": {

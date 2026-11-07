@@ -256,6 +256,19 @@ class ObserverManager:
             raise ValueError("observer name is required")
         if normalized_kind not in self.adapters:
             raise ValueError(f"unknown observer kind: {normalized_kind}")
+        if normalized_kind == "authenticated_opportunity":
+            from .opportunity_admission import AuthenticatedOpportunityObserver
+
+            if not isinstance(self.adapters[normalized_kind], AuthenticatedOpportunityObserver):
+                raise ValueError("authenticated_opportunity requires a host-pinned verifier")
+            if dispatch_route.strip().lower() != "volition_signal":
+                raise ValueError("authenticated_opportunity requires volition_signal route")
+            if (
+                set(config) != {"source_id", "goal_id"}
+                or not isinstance(dispatch_config, dict)
+                or config["goal_id"] != dispatch_config.get("target")
+            ):
+                raise ValueError("authenticated_opportunity target must bind to configured goal")
         if not task.strip():
             raise ValueError("observer task is required")
         if every_seconds <= 0:
@@ -574,7 +587,14 @@ class ObserverManager:
         adapter = self.adapters.get(record["kind"])
         if adapter is None:
             raise RuntimeError(f"observer adapter is unavailable: {record['kind']}")
-        return adapter.sample(record["config"])
+        sampled = adapter.sample(record["config"])
+        if record["kind"] == "authenticated_opportunity":
+            from .opportunity_admission import AuthenticatedOpportunityObserver
+
+            if not isinstance(adapter, AuthenticatedOpportunityObserver):
+                raise RuntimeError("host-pinned opportunity adapter is absent")
+            return adapter.public_observation(sampled)
+        return sampled
 
     def _claim_due(self, observer_id: str, *, now: float) -> dict[str, Any] | None:
         self.store.connection.execute("BEGIN IMMEDIATE")
@@ -641,6 +661,7 @@ class ObserverManager:
         observation: Observation,
         *,
         now: float,
+        adapter: ObserverAdapter,
     ) -> bool:
         self.store.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -678,6 +699,21 @@ class ObserverManager:
                 config=dispatch_config,
                 capabilities=capabilities,
             )
+
+            if record["kind"] == "authenticated_opportunity":
+                from .opportunity_admission import AuthenticatedOpportunityObserver
+
+                if not isinstance(adapter, AuthenticatedOpportunityObserver):
+                    raise RuntimeError("host-pinned opportunity adapter is absent")
+                if dispatch_route != "volition_signal" or dispatch_config.get("target") != record["config"].get("goal_id"):
+                    raise RuntimeError("authenticated opportunity dispatch binding changed")
+                if not adapter.admit(
+                    config=record["config"], observation=observation,
+                    store=self.store, now=now,
+                ):
+                    self.store.connection.execute("COMMIT")
+                    return False
+                observation = adapter.public_observation(observation)
 
             previous_digest = current["last_digest"]
             is_initial = previous_digest is None
@@ -903,7 +939,7 @@ class ObserverManager:
                 )
                 continue
             try:
-                if self._record_observation(record, observation, now=now):
+                if self._record_observation(record, observation, now=now, adapter=adapter):
                     emitted += 1
             except Exception as exc:
                 errors += 1
