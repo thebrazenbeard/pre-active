@@ -30,8 +30,8 @@ from volition import (
 )
 
 
-MESO_SOURCE = "meso-crct @ git+https://github.com/thebrazenbeard/meso-crct.git@14bd3f6a359fc267a5246ccfc1682cb4c0c1b2e4"
-VOLITION_SOURCE = "volition @ git+https://github.com/thebrazenbeard/volition.git@7f7174b275cc24b7b8cd30ffdb444e512f29827c"
+MESO_SOURCE = "meso-crct @ git+https://github.com/thebrazenbeard/meso-crct.git@86c15a633daafd27cb4c3273e228f786dd54dc41"
+VOLITION_SOURCE = "volition @ git+https://github.com/thebrazenbeard/volition.git@f622e564bf257b0ffc0b3c05130b62db1c201d3d"
 
 
 def test_meso_and_dev_extras_bind_the_reviewed_observation_source() -> None:
