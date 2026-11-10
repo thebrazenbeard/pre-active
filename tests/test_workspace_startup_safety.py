@@ -91,6 +91,50 @@ def inspected_workspace_files(root: Path):
             yield path
 
 
+def unsafe_workspace_settings(root: Path) -> list[str]:
+    problems = []
+    for workspace in root.rglob("*.code-workspace"):
+        if ".git" in workspace.parts:
+            continue
+        settings = read_jsonc(workspace).get("settings", {})
+        if not isinstance(settings, dict):
+            problems.append(f"invalid workspace settings: {workspace}")
+            continue
+        policy = settings.get("task.allowAutomaticTasks")
+        # VS Code's supported values are the strings "on" and "off".
+        # Deny any explicit value other than "off", including boolean True.
+        if policy is not None and policy != "off":
+            problems.append(f"automatic tasks enabled/unknown in {workspace}: {policy!r}")
+    return problems
+
+
+def plausible_sfnt(data: bytes) -> bool:
+    """Basic sfnt directory validation, not font provenance or code auditing."""
+    if len(data) < 12 or data[:4] not in FONT_HEADERS:
+        return False
+    count = int.from_bytes(data[4:6], "big")
+    if not 1 <= count <= 512:
+        return False
+    directory_end = 12 + 16 * count
+    if directory_end > len(data):
+        return False
+    tags = set()
+    for i in range(count):
+        start = 12 + 16 * i
+        record = data[start:start + 16]
+        tag = record[:4]
+        offset = int.from_bytes(record[8:12], "big")
+        length = int.from_bytes(record[12:16], "big")
+        if (
+            tag in tags or not all(32 <= b <= 126 for b in tag)
+            or offset < directory_end or length == 0
+            or offset + length > len(data)
+        ):
+            return False
+        tags.add(tag)
+    return b"head" in tags and b"maxp" in tags
+
+
 def suspicious_fonts(root: Path) -> list[str]:
     problems = []
     asset_dir = root / "public" / "fonts"
@@ -104,8 +148,8 @@ def suspicious_fonts(root: Path) -> list[str]:
         if path.suffix.casefold() == ".ttf":
             if path.name.casefold() == "fa-solid-600.ttf":
                 problems.append(f"known disguised font path: {path}")
-            if path.read_bytes()[:4] not in FONT_HEADERS:
-                problems.append(f"invalid OpenType/TrueType header: {path}")
+            if not plausible_sfnt(path.read_bytes()):
+                problems.append(f"invalid sfnt structure: {path}")
     return problems
 
 
@@ -120,14 +164,21 @@ class WorkspaceStartupSafetyTests(unittest.TestCase):
         settings = read_jsonc(settings_file)
         self.assertEqual(settings.get("task.allowAutomaticTasks"), "off")
         self.assertNotIn("tasks", settings)
-        for workspace in ROOT.rglob("*.code-workspace"):
-            if ".git" in workspace.parts:
-                continue
-            settings = read_jsonc(workspace).get("settings", {})
-            self.assertNotEqual(
-                settings.get("task.allowAutomaticTasks"), True,
-                f"automatic tasks enabled in {workspace}",
+        self.assertEqual(unsafe_workspace_settings(ROOT), [])
+
+    def test_workspace_settings_on_string_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "choice.code-workspace"
+            workspace.write_text(
+                '{"settings":{"task.allowAutomaticTasks":"on"}}',
+                encoding="utf-8",
             )
+            self.assertEqual(len(unsafe_workspace_settings(Path(tmp))), 1)
+            workspace.write_text(
+                '{"settings":{"task.allowAutomaticTasks":"off"}}',
+                encoding="utf-8",
+            )
+            self.assertEqual(unsafe_workspace_settings(Path(tmp)), [])
 
     def test_no_disguised_fonts(self):
         self.assertEqual(suspicious_fonts(ROOT), [])
@@ -169,7 +220,11 @@ class WorkspaceStartupSafetyTests(unittest.TestCase):
             fonts = Path(tmp) / "public" / "fonts"
             fonts.mkdir(parents=True)
             (fonts / "other.ttf").write_bytes(b"const payload = 1;")
-            self.assertTrue(any("invalid OpenType" in issue for issue in suspicious_fonts(Path(tmp))))
+            self.assertTrue(any("invalid sfnt" in issue for issue in suspicious_fonts(Path(tmp))))
+            # b"true" can be a legitimate sfnt signature but also the start
+            # of valid JavaScript. Four magic bytes alone prove nothing.
+            (fonts / "other.ttf").write_bytes(b"true;\nlet payload = 1;")
+            self.assertTrue(any("invalid sfnt" in issue for issue in suspicious_fonts(Path(tmp))))
 
 
 if __name__ == "__main__":
