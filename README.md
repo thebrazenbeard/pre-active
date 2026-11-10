@@ -408,6 +408,13 @@ host startup, or verified external effect is implied by the repository tests.
 
 ### Observer dispatch routes
 
+An optional **host-pinned authenticated opportunity** observer is documented in
+[`docs/AUTHENTICATED_OPPORTUNITY_ADMISSION.md`](docs/AUTHENTICATED_OPPORTUNITY_ADMISSION.md).
+Unlike file snapshots or unverified diagnostic samples, it requires an
+explicit source key, trusted current goal revision and transactional replay
+admission before it may produce an inert `volition.signal`. It is source-only:
+there is no default registration or automatic producer installation.
+
 Observers keep their existing direct `autonomous_turn` route by default. An
 observer can instead opt into a mutually exclusive `volition_signal` route after
 its initiative policy decides to emit.
