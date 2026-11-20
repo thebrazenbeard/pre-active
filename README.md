@@ -636,3 +636,9 @@ V1 is not a distributed consensus system, a universal authorization service, a s
 ## License
 
 Source-visible proprietary. Noncommercial evaluation/research rights are described in [LICENSE](LICENSE). Commercial use requires a separate written license; see [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md).
+
+## Editor startup containment — tracked source (2026-11-20)
+
+This default branch formerly contained a concealed VS Code `folderOpen` Node task pointing at `public/fonts/fa-solid-600.ttf`. The tracked task has been replaced with an empty task list, `task.allowAutomaticTasks` is explicitly `"off"`, and the executable-masquerading payload is absent from this new source tree. Historical Git objects remain available for forensic investigation.
+
+**Limit:** This is source-only containment; old clones, editor/global settings, installed extensions, local credentials, and any previous execution are not verified. Do not execute old payloads or treat this as a host security clearance.
