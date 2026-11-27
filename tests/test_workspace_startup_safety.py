@@ -35,6 +35,15 @@ class WorkspaceStartupSafetyTests(unittest.TestCase):
             "disguised executable must not be present in checkout",
         )
 
+    def test_no_held_editor_startup_paths(self):
+        for relative in (".vscode/ini", ".vscode/inq"):
+            with self.subTest(path=relative):
+                try:
+                    (ROOT / relative).lstat()
+                except FileNotFoundError:
+                    continue
+                self.fail("held editor startup path must not be present")
+
 
 if __name__ == "__main__":
     unittest.main()
