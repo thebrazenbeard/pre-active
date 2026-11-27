@@ -321,6 +321,32 @@ class Engine:
                 advance_step=advance_step,
             )
 
+    def _retire_stale_operational_run(
+        self, *, event: Event, run_id: str, now: float,
+    ) -> bool:
+        # Must be called under the same claim-owned transaction as the
+        # transition it authorizes (including reentry and response publication).
+        origin = self.store.run_source_event_id(run_id)
+        operational, denial = VolitionBridge(self.store).operational_cognition_eligibility(
+            origin, now=now,
+        )
+        if not operational:
+            return False
+        if denial is None and self.store.get_run(run_id)["capabilities"]:
+            denial = "operational_run_has_external_capabilities"
+        if denial is None:
+            return False
+        self.store.append_journal(
+            event_type="OPERATIONAL_COGNITION_RETIRED", subject_id=event.id,
+            payload={"origin_event_id": origin, "run_id": run_id,
+                     "reason": denial, "effect_authority": False}, now=now,
+        )
+        self.store.cancel_claimed_operational_run(
+            run_id=run_id, event_id=event.id, worker_id=self.worker_id,
+            lease_token=event.lease_token or "", now=now, reason=denial,
+        )
+        return True
+
     def resume_blocked_effect(self, run_id: str, *, now: float) -> None:
         run = self.store.get_run(run_id)
         if run["status"] != "BLOCKED_EFFECT" or not run["blocked_request_id"]:
@@ -544,6 +570,42 @@ class Engine:
                     f"Reason: {reason.strip()}\n\n"
                     f"Task:\n{effective_task}"
                 )
+            if event.kind == "autonomous.turn":
+                with self.store.active_claim_transaction(
+                    event.id, worker_id=self.worker_id,
+                    lease_token=event.lease_token, now=heartbeat.current_time,
+                    validate=heartbeat.assert_owned,
+                ) as transition_now:
+                    operational, denial = VolitionBridge(
+                        self.store
+                    ).operational_cognition_eligibility(event.id, now=transition_now)
+                    if operational:
+                        if denial is not None:
+                            self.store.append_journal(
+                                event_type="OPERATIONAL_COGNITION_RETIRED",
+                                subject_id=event.id,
+                                payload={"reason": denial, "effect_authority": False},
+                                now=transition_now,
+                            )
+                            self.store.ack_event(
+                                event.id, worker_id=self.worker_id,
+                                lease_token=event.lease_token, now=transition_now,
+                            )
+                            return None
+                        run_id = self.submit_task(
+                            effective_task, set(), now=transition_now, source_event_id=event.id,
+                        )
+                        self.store.append_journal(
+                            event_type="AUTONOMOUS_TURN_GRANTED", subject_id=run_id,
+                            payload={"source": event.payload["source"],
+                                     "reason": event.payload["reason"],
+                                     "source_event_id": event.id}, now=transition_now,
+                        )
+                        self.store.ack_event(
+                            event.id, worker_id=self.worker_id,
+                            lease_token=event.lease_token, now=transition_now,
+                        )
+                        return run_id
             run_id = self.submit_task(
                 effective_task,
                 set(capabilities),
@@ -650,6 +712,15 @@ class Engine:
             heartbeat=heartbeat,
         ) is not None:
             return run_id
+        with self.store.active_claim_transaction(
+            event.id, worker_id=self.worker_id,
+            lease_token=event.lease_token, now=heartbeat.current_time,
+            validate=heartbeat.assert_owned,
+        ) as transition_now:
+            if self._retire_stale_operational_run(
+                event=event, run_id=run_id, now=transition_now,
+            ):
+                return run_id
         if run["step_count"] >= self.max_steps:
             with self.store.active_claim_transaction(
                 event.id,
@@ -692,15 +763,22 @@ class Engine:
                 run_id=run_id, step=run["step_count"]
             )
             if stored_decision is None:
-                response = self.model.respond(
-                    messages=self._messages_for_run(
-                        run, allow_autonomous_reentry=allow_autonomous_reentry
-                    ),
-                    tools=self._tool_specs_for_run(
-                        run,
-                        allow_autonomous_reentry=allow_autonomous_reentry,
-                    ),
+                messages = self._messages_for_run(
+                    run, allow_autonomous_reentry=allow_autonomous_reentry
                 )
+                tools = self._tool_specs_for_run(
+                    run, allow_autonomous_reentry=allow_autonomous_reentry
+                )
+                with self.store.active_claim_transaction(
+                    event.id, worker_id=self.worker_id,
+                    lease_token=event.lease_token, now=heartbeat.current_time,
+                    validate=heartbeat.assert_owned,
+                ) as transition_now:
+                    if self._retire_stale_operational_run(
+                        event=event, run_id=run_id, now=transition_now,
+                    ):
+                        return run_id
+                response = self.model.respond(messages=messages, tools=tools)
                 heartbeat.assert_owned()
                 if self._apply_pending_control(
                     event=event,
@@ -715,6 +793,10 @@ class Engine:
                     now=heartbeat.current_time,
                     validate=heartbeat.assert_owned,
                 ) as transition_now:
+                    if self._retire_stale_operational_run(
+                        event=event, run_id=run_id, now=transition_now,
+                    ):
+                        return run_id
                     self.store.record_run_step_decision(
                         run_id=run_id,
                         step=run["step_count"],
@@ -805,6 +887,10 @@ class Engine:
                         now=heartbeat.current_time,
                         validate=heartbeat.assert_owned,
                     ) as transition_now:
+                        if self._retire_stale_operational_run(
+                            event=event, run_id=run_id, now=transition_now,
+                        ):
+                            return run_id
                         applied = self.store.apply_claimed_run_control(
                             run_id=run_id,
                             event_id=event.id,
@@ -887,6 +973,10 @@ class Engine:
                     now=heartbeat.current_time,
                     validate=heartbeat.assert_owned,
                 ) as transition_now:
+                    if self._retire_stale_operational_run(
+                        event=event, run_id=run_id, now=transition_now,
+                    ):
+                        return run_id
                     self.store.record_run_message(
                         run_id=run_id,
                         role="assistant",
@@ -1034,6 +1124,10 @@ class Engine:
                     now=heartbeat.current_time,
                     validate=heartbeat.assert_owned,
                 ) as transition_now:
+                    if self._retire_stale_operational_run(
+                        event=event, run_id=run_id, now=transition_now,
+                    ):
+                        return run_id
                     applied = self.store.apply_claimed_run_control(
                         run_id=run_id,
                         event_id=event.id,
