@@ -457,7 +457,9 @@ class Store:
         priority: int = 0,
         contract_version: int = RUN_CONTRACT_VERSION,
     ) -> str:
-        self.connection.execute("BEGIN IMMEDIATE")
+        owns_transaction = not self.connection.in_transaction
+        if owns_transaction:
+            self.connection.execute("BEGIN IMMEDIATE")
         try:
             run_id = self.create_run(
                 task=task,
@@ -473,11 +475,21 @@ class Store:
                 dedup_key=f"run-step:{run_id}:0",
                 now=now,
             )
-            self.connection.execute("COMMIT")
+            if owns_transaction:
+                self.connection.execute("COMMIT")
         except BaseException:
-            self.connection.execute("ROLLBACK")
+            if owns_transaction:
+                self.connection.execute("ROLLBACK")
             raise
         return run_id
+
+    def run_source_event_id(self, run_id: str) -> str | None:
+        row = self.connection.execute(
+            "SELECT source_event_id FROM runs WHERE id=?", (run_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return row["source_event_id"]
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         row = self.connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
@@ -886,6 +898,32 @@ class Store:
             },
             now=now,
         )
+
+    def cancel_claimed_operational_run(
+        self, *, run_id: str, event_id: str, worker_id: str,
+        lease_token: str, now: float, reason: str,
+    ) -> None:
+        if not self.connection.in_transaction:
+            raise RuntimeError("operational cancellation requires claim transaction")
+        self._require_active_claim(
+            event_id, worker_id=worker_id, lease_token=lease_token, now=now,
+        )
+        cursor = self.connection.execute(
+            "UPDATE runs SET control_action='CANCEL',control_reason=?,"
+            "control_requested_at=? WHERE id=? AND status='RUNNING'",
+            (reason, now, run_id),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("operational cancellation lost RUNNING state")
+        self.append_journal(
+            event_type="RUN_CONTROL_REQUESTED", subject_id=run_id,
+            payload={"action": "CANCEL", "reason": reason}, now=now,
+        )
+        if self.apply_claimed_run_control(
+            run_id=run_id, event_id=event_id, worker_id=worker_id,
+            lease_token=lease_token, now=now,
+        ) != "CANCEL":
+            raise RuntimeError("operational cancellation was not applied")
 
     def apply_claimed_run_control(
         self,

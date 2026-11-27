@@ -63,6 +63,97 @@ class VolitionBridge:
     def __init__(self, store: Store) -> None:
         self.store = store
 
+    def operational_cognition_eligibility(
+        self, source_event_id: str | None, *, now: float,
+    ) -> tuple[bool, str | None]:
+        """Return (operational origin, denial reason). Caller owns the transaction.
+
+        The producer receipt and origin event remain immutable across reentry.
+        This is local eligibility, not external observation authentication.
+        """
+        if source_event_id is None:
+            return False, None
+        row = self.store.connection.execute(
+            "SELECT kind, payload_json, dedup_key FROM events WHERE id=?",
+            (source_event_id,),
+        ).fetchone()
+        receipt = self.store.connection.execute(
+            "SELECT proposal_id,goal_id,created_at FROM operational_proposal_receipts "
+            "WHERE cognition_event_id=?", (source_event_id,),
+        ).fetchone()
+        if row is None:
+            return (True, "missing_operational_origin") if receipt else (False, None)
+        payload = json.loads(row["payload_json"])
+        meta = payload.get("volition")
+        operational = (
+            receipt is not None
+            or str(row["dedup_key"] or "").startswith("operational-cognition:")
+            or (isinstance(meta, dict) and "proposal_id" in meta)
+        )
+        if not operational:
+            return False, None
+        if (
+            row["kind"] != "autonomous.turn" or receipt is None
+            or not isinstance(meta, dict)
+            or payload.get("capabilities") != []
+            or payload.get("source") != "ENDOGENOUS"
+            or meta.get("effect_authority") is not False
+            or meta.get("choice_class") != "MODEL_PROPOSED"
+            or meta.get("proposal_id") != receipt["proposal_id"]
+            or meta.get("goal_id") != receipt["goal_id"]
+            or type(meta.get("goal_revision")) is not int
+            or not isinstance(meta.get("choice_id"), str)
+            or not isinstance(meta.get("evidence_id"), str)
+            or not isinstance(meta.get("evidence_digest"), str)
+            or not isinstance(meta.get("verifier_id"), str)
+        ):
+            return True, "unbound_operational_origin"
+        try:
+            now = _finite_timestamp(now)
+            admitted_at = _finite_timestamp(meta["admitted_at"])
+            expires_at = _finite_timestamp(meta["expires_at"])
+            if admitted_at != float(receipt["created_at"]) or expires_at <= admitted_at:
+                return True, "invalid_freshness_binding"
+            if now < admitted_at or now >= expires_at:
+                return True, "observation_expired_or_clock_rollback"
+            state = self.store.get_operational_motivation_state()
+            if state is None:
+                return True, "missing_operational_state"
+            from volition.operational_drive import OperationalMotivation
+            loop = OperationalMotivation.from_snapshot(state["snapshot"])
+            goal = loop.engine.active_goal
+            if goal is None or (
+                goal.goal_id, goal.choice_id, goal.revision, goal.target
+            ) != (
+                meta["goal_id"], meta["choice_id"], meta["goal_revision"], meta["target"]
+            ):
+                return True, "goal_no_longer_current"
+            # Neither another target's observation nor a global snapshot revision
+            # may refresh the originating observation or authorize its dispatch.
+            if (
+                state["snapshot"]["evidence"].get(meta["evidence_id"]) != meta["evidence_digest"]
+                or not any(
+                    w.target == goal.target and w.eligible
+                    and w.evidence_id == meta["evidence_id"]
+                    and w.proposal_id == meta["proposal_id"]
+                    for w in loop.wants
+                )
+                or goal.target in loop.protection_latches
+            ):
+                return True, "originating_evidence_no_longer_current"
+            horizon = loop.engine.policy.goal_reappraisal_seconds
+            anchor = _finite_timestamp(state["updated_at"])
+            age = loop.engine.elapsed_seconds - goal.adopted_at_seconds + max(0., now - anchor)
+            if (
+                expires_at != admitted_at + horizon or horizon <= 0
+                or age >= horizon
+                or now < anchor - MAX_VOLITION_CLOCK_BACKSTEP_SECONDS
+            ):
+                return True, "goal_reappraisal_due"
+        except (KeyError, TypeError, ValueError, OverflowError, ImportError, RuntimeError):
+            return True, "invalid_operational_binding"
+        return True, None
+
     def record_operational_goal_completion(
         self, *, admitted: object, now: float
     ) -> dict[str, Any]:
@@ -90,38 +181,89 @@ class VolitionBridge:
             ):
                 raise RuntimeError("operational motivation state exceeds clock rollback bound")
             loop = OperationalMotivation.from_snapshot(state["snapshot"])
-            completed = loop.complete(admitted)
-            if completed:
-                anchor = max(now, previous_clock)
+            claim = admitted.claim
+            # Exact historical replay stays a receipt lookup, not a new appraisal
+            # or a clock tick. Delegate all receipt equality checks to Volition.
+            historical = any(
+                event.kind == "GOAL_COMPLETED"
+                and dict(event.details).get("outcome_event_id") == claim.outcome_event_id
+                for event in loop.engine.events
+            )
+            anchor = previous_clock if historical else max(now, previous_clock)
+            denial = None
+            restored = json.loads(json.dumps(loop.snapshot(), allow_nan=False))
+            original_goal = loop.engine.active_goal
+            if historical:
+                completed = loop.complete(admitted)
+                if completed:
+                    raise RuntimeError("historical completion unexpectedly credited")
+            else:
+                # Advance before credit. The owner may normalize expired goals
+                # during restore or advancement. With an older owner that has
+                # not yet implemented expiry, deny credit independently without
+                # inventing a suspension or editing the owner's internal state.
                 loop.advance(anchor - previous_clock)
+                goal = loop.engine.active_goal
+                if goal is None or (
+                    goal.goal_id, goal.choice_id, goal.revision, goal.target
+                ) != (claim.goal_id, claim.choice_id, claim.goal_revision, claim.target):
+                    denial = "goal completion does not match exact active goal"
+                else:
+                    age = loop.engine.elapsed_seconds - goal.adopted_at_seconds
+                    horizon = loop.engine.policy.goal_reappraisal_seconds
+                    if (age > 0 if horizon <= 0 else age >= horizon):
+                        denial = "goal completion expired before admission"
+                completed = False if denial else loop.complete(admitted)
+                if denial and restored == state["snapshot"] and (
+                    original_goal is None or (
+                        original_goal.goal_id, original_goal.choice_id,
+                        original_goal.revision, original_goal.target
+                    ) != (claim.goal_id, claim.choice_id, claim.goal_revision, claim.target)
+                ):
+                    raise ValueError(denial)
+            snapshot = json.loads(json.dumps(loop.snapshot(), allow_nan=False))
+            # Even an inadmissible completion can observe genuine owner-side
+            # expiry/restore normalization. Persist that state before refusing
+            # credit; never manufacture a successful completion receipt.
+            revision = int(state["revision"])
+            if snapshot != state["snapshot"] or anchor != previous_clock:
                 revision = self.store.save_operational_motivation_state(
-                    loop.snapshot(), expected_revision=int(state["revision"]), now=anchor,
+                    snapshot, expected_revision=revision, now=anchor,
                 )
+            if completed:
                 self.store.append_journal(
                     event_type="OPERATIONAL_GOAL_COMPLETION_ADMITTED",
-                    subject_id=admitted.claim.outcome_event_id,
+                    subject_id=claim.outcome_event_id,
                     payload={
-                        "goal_id": admitted.claim.goal_id,
-                        "choice_id": admitted.claim.choice_id,
-                        "result_receipt_id": admitted.claim.result_receipt_id,
+                        "goal_id": claim.goal_id,
+                        "choice_id": claim.choice_id,
+                        "goal_revision": claim.goal_revision,
+                        "result_receipt_id": claim.result_receipt_id,
                         "verifier_id": admitted.verifier_id,
                         "evidence_authenticity_asserted_by_caller": True,
                         "effect_authority": False,
                     },
                     now=now,
                 )
-            else:
-                revision = int(state["revision"])
+            elif denial:
+                self.store.append_journal(
+                    event_type="OPERATIONAL_GOAL_COMPLETION_REJECTED",
+                    subject_id=claim.outcome_event_id,
+                    payload={"reason": denial, "effect_authority": False},
+                    now=now,
+                )
             self.store.connection.execute("COMMIT")
-            return {
-                "outcome_event_id": admitted.claim.outcome_event_id,
-                "state_revision": revision,
-                "newly_completed": completed,
-                "effect_authority": False,
-            }
         except BaseException:
             self.store.connection.execute("ROLLBACK")
             raise
+        if denial:
+            raise ValueError(denial)
+        return {
+            "outcome_event_id": claim.outcome_event_id,
+            "state_revision": revision,
+            "newly_completed": completed,
+            "effect_authority": False,
+        }
 
     def submit_model_want_proposal(
         self,
@@ -225,7 +367,10 @@ class VolitionBridge:
             )
             goal = loop.propose(proposal, admitted_observation)
             cognition_event_id = None
-            if novel and goal is not None and goal.target == proposal.target:
+            if (
+                novel and goal is not None and goal.target == proposal.target
+                and loop.engine.policy.goal_reappraisal_seconds > 0
+            ):
                 request = loop.request_cognition()
                 if request is not None:
                     if request.source != "ENDOGENOUS" or request.effect_authority is not False:
@@ -244,6 +389,10 @@ class VolitionBridge:
                             "reason": "Volition admitted novel current evidence for a model-proposed goal",
                             "volition": {
                                 "goal_id": request.goal_id,
+                                "choice_id": goal.choice_id,
+                                "goal_revision": goal.revision,
+                                "admitted_at": now,
+                                "expires_at": now + loop.engine.policy.goal_reappraisal_seconds,
                                 "target": request.target,
                                 "choice_class": "MODEL_PROPOSED",
                                 "proposal_id": proposal.proposal_id,
